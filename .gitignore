@@ -1,0 +1,26 @@
+# Relatórios gerados pela ferramenta (contêm dados sensíveis de recon)
+IPWhoAll/
+
+# Ambiente virtual Python
+venv/
+.venv/
+env/
+*/venvs/
+
+# Cache e bytecode do Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Arquivos de ambiente / segredos
+.env
+*.key
+
+# Arquivos de IDE / editor
+.vscode/
+.idea/
+*.swp
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
