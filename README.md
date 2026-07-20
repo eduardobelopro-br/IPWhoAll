@@ -2,50 +2,50 @@
 
 **Designed for p1r1l4mp0**
 
-Automação de reconhecimento inicial (recon) para pentests autorizados. A partir de um IP ou endereço web, a ferramenta identifica o tipo de entrada, verifica disponibilidade do host (com evasão de bloqueio de ICMP), resolve DNS, consulta WHOIS/RDAP e — quando o alvo é brasileiro — extrai e consulta o CNPJ automaticamente.
+Initial reconnaissance automation for authorized pentests. Given an IP or web address, the tool identifies the input type, checks host availability (with ICMP-block evasion), resolves DNS, queries WHOIS/RDAP, and — when the target is Brazilian — automatically extracts and looks up the CNPJ.
 
 ---
 
-## ⚠️ Aviso legal e ético
+## ⚠️ Legal and Ethical Notice
 
-Esta ferramenta deve ser usada **exclusivamente em ativos para os quais você possua autorização explícita de teste** (contrato de pentest, escopo assinado, programa de bug bounty, ambiente de laboratório próprio, etc.).
+This tool must be used **exclusively against assets for which you have explicit testing authorization** (signed pentest contract, agreed scope, bug bounty program, your own lab environment, etc.).
 
-Reconhecimento e varredura de sistemas sem autorização podem configurar crime, dependendo da jurisdição (no Brasil, por exemplo, à luz da Lei nº 12.737/2012 — "Lei Carolina Dieckmann" — e do Marco Civil da Internet). O uso desta ferramenta é de inteira responsabilidade de quem a executa.
-
----
-
-## Funcionalidades
-
-- **Detecção automática de entrada**: identifica se o valor informado é um IP ou um domínio/URL.
-- **Fluxo adaptativo**:
-  - Domínio → `nslookup` (resolve IPs) → checagem de disponibilidade → WHOIS/RDAP → CNPJ.
-  - IP → checagem de disponibilidade → `nslookup` reverso (PTR) → WHOIS/RDAP → CNPJ.
-- **Checagem de disponibilidade com evasão de bloqueio de ICMP**: se o `ping` não obtiver resposta (comum em ambientes cloud/corporativos que bloqueiam ICMP), faz fallback automático testando conexão TCP em portas comuns (443, 80, 22, 3389, 21, 25, 8080).
-- **Saída completa e bruta**: exibe a saída real do `ping` e do `nslookup` do sistema, não versões resumidas.
-- **WHOIS**: consulta via `python-whois`, exibindo o retorno completo do servidor.
-- **RDAP oficial do Registro.br**: para domínios `.br`, consulta a API estruturada (`rdap.registro.br`), muito mais confiável que o WHOIS tradicional para extrair o CNPJ do titular do domínio.
-- **Extração automática de CNPJ**: tenta extrair via RDAP primeiro; se não encontrar, tenta via regex no texto do WHOIS; só pede input manual como último recurso.
-- **Consulta de CNPJ na BrasilAPI**: retorna razão social, situação cadastral, CNAE, sócios (QSA), endereço, regime tributário, etc., formatado de forma legível.
-- **Geração de relatório**: ao final, pergunta se deseja salvar tudo o que foi exibido em um arquivo `.txt`, deixando você escolher o diretório (pasta atual ou `~/Documents`) e o nome do arquivo, organizado na pasta `IPWhoAll/`.
+Reconnaissance and scanning of systems without authorization may constitute a crime depending on the jurisdiction. Use of this tool is entirely the responsibility of the person running it.
 
 ---
 
-## Requisitos
+## Features
+
+- **Automatic input detection**: identifies whether the given value is an IP or a domain/URL.
+- **Adaptive flow**:
+  - Domain → `nslookup` (resolves IPs) → availability check → WHOIS/RDAP → CNPJ.
+  - IP → availability check → reverse `nslookup` (PTR) → WHOIS/RDAP → CNPJ.
+- **Availability check with ICMP-block evasion**: if `ping` gets no response (common in cloud/corporate environments that block ICMP), automatically falls back to testing a TCP connection on common ports (443, 80, 22, 3389, 21, 25, 8080).
+- **Full, raw output**: shows the actual output of the system's `ping` and `nslookup`, not a summarized version.
+- **WHOIS**: queried via `python-whois`, displaying the full response from the server.
+- **Official Registro.br RDAP**: for `.br` domains, queries the structured API (`rdap.registro.br`), far more reliable than traditional WHOIS for extracting the domain holder's CNPJ.
+- **Automatic CNPJ extraction**: tries RDAP first; if not found, falls back to regex on the WHOIS text; only asks for manual input as a last resort.
+- **CNPJ lookup via BrasilAPI**: returns legal name, registration status, CNAE, partners/officers (QSA), address, tax regime, etc., in a readable format.
+- **Report generation**: at the end, asks whether to save everything that was displayed to a `.txt` file, letting you choose the directory (current folder or `~/Documents`) and file name, organized under the `IPWhoAll/` folder.
+
+---
+
+## Requirements
 
 - Python 3.10+
-- Sistema com os comandos `ping` e `nslookup` disponíveis no PATH (a ferramenta tem fallback via Python puro caso não estejam instalados, mas a saída detalhada só aparece com os comandos do sistema).
-- Bibliotecas Python:
+- A system with the `ping` and `nslookup` commands available on the PATH (the tool falls back to pure Python if they aren't installed, but detailed output only appears with the system commands).
+- Python libraries:
   - [`python-whois`](https://pypi.org/project/python-whois/)
   - [`requests`](https://pypi.org/project/requests/)
 
 ---
 
-## Instalação
+## Installation
 
-Ambientes como o Kali Linux usam Python "externally managed" (PEP 668), então é recomendado isolar as dependências em um ambiente virtual (venv).
+Environments like Kali Linux use an "externally managed" Python (PEP 668), so it's recommended to isolate dependencies in a virtual environment (venv).
 
 ```bash
-git clone https://github.com/<seu-usuario>/IPWhoAll.git
+git clone https://github.com/<your-username>/IPWhoAll.git
 cd IPWhoAll
 
 python3 -m venv ~/venvs/pentest
@@ -53,9 +53,9 @@ source ~/venvs/pentest/bin/activate
 pip install python-whois requests
 ```
 
-### Opção alternativa: script wrapper automático
+### Alternative: automatic wrapper script
 
-O repositório inclui `run.sh`, que cria o venv (se não existir), instala as dependências, ativa o ambiente, executa a ferramenta e desativa o venv automaticamente ao sair (inclusive com `Ctrl+C`):
+The repository includes `run.sh`, which creates the venv (if it doesn't exist), installs dependencies, activates the environment, runs the tool, and deactivates the venv automatically on exit (including on `Ctrl+C`):
 
 ```bash
 chmod +x run.sh
@@ -64,98 +64,98 @@ chmod +x run.sh
 
 ---
 
-## Uso
+## Usage
 
 ```bash
-source ~/venvs/pentest/bin/activate   # se não estiver usando o run.sh
+source ~/venvs/pentest/bin/activate   # if not using run.sh
 python3 recon.py
 ```
 
-Ao rodar, a ferramenta vai pedir:
+When run, the tool will prompt:
 
 ```
-Informe o IP ou endereço web (domínio/URL) do alvo:
+Enter the target's IP or web address (domain/URL):
 ```
 
-Basta digitar um IP (`192.0.2.10`) ou um domínio/URL (`exemplo.com.br`, `https://exemplo.com.br`).
+Just type an IP (`192.0.2.10`) or a domain/URL (`example.com`, `https://example.com`).
 
-Ao final da execução, ela pergunta:
-
-```
-Deseja salvar os dados encontrados em um arquivo? (s/n):
-```
-
-Se a resposta for `s`, você escolhe onde salvar:
+At the end of the run, it asks:
 
 ```
-Onde deseja salvar o relatório?
-  1) Pasta atual (/home/kali/pentest-tools)
+Would you like to save the findings to a file? (y/n):
+```
+
+If you answer `y`, you'll choose where to save it:
+
+```
+Where would you like to save the report?
+  1) Current folder (/home/kali/pentest-tools)
   2) Documents (/home/kali/Documents)
-Escolha uma opção (1/2) [padrão: 1]:
+Choose an option (1/2) [default: 1]:
 ```
 
-E em seguida o nome do arquivo:
+And then the file name:
 
 ```
-Nome do arquivo (Enter para usar o padrão '<alvo>_<data>_<hora>.txt'):
+File name (press Enter to use the default '<target>_<date>_<time>.txt'):
 ```
 
-- Digite um nome personalizado (a extensão `.txt` é adicionada automaticamente, se necessário), ou
-- Pressione Enter para usar o nome padrão sugerido.
+- Type a custom name (the `.txt` extension is added automatically if needed), or
+- Press Enter to use the suggested default name.
 
-O relatório completo da sessão é salvo em:
+The full session report is saved to:
 
 ```
-<diretório escolhido>/IPWhoAll/<nome do arquivo>.txt
+<chosen directory>/IPWhoAll/<file name>.txt
 ```
 
-A pasta `IPWhoAll/` é criada automaticamente na primeira execução em cada diretório escolhido; nas seguintes, apenas o arquivo é adicionado.
+The `IPWhoAll/` folder is created automatically on the first run in each chosen directory; on subsequent runs, only the file is added.
 
 ---
 
-## Estrutura do projeto
+## Project Structure
 
 ```
 IPWhoAll/
-├── recon.py        # Script principal
-├── run.sh           # Wrapper opcional: cria/ativa venv, roda o script, desativa ao sair
-├── README.md        # Este arquivo
-├── LICENSE           # Licença MIT
-├── .gitignore        # Ignora relatórios gerados, venv e arquivos de ambiente
-└── IPWhoAll/         # Criada em tempo de execução, com os relatórios salvos (não versionada)
+├── recon.py        # Main script
+├── run.sh           # Optional wrapper: creates/activates the venv, runs the script, deactivates on exit
+├── README.md        # This file
+├── LICENSE           # MIT License
+├── .gitignore        # Ignores generated reports, venv, and environment files
+└── IPWhoAll/         # Created at runtime, holds saved reports (not versioned)
 ```
 
 ---
 
-## Fontes de dados utilizadas
+## Data Sources Used
 
-| Etapa               | Fonte                                                        |
-|----------------------|---------------------------------------------------------------|
-| Resolução de DNS     | Comando `nslookup` do sistema (fallback: `socket` do Python) |
-| Disponibilidade      | `ping` ICMP do sistema + fallback TCP connect                |
-| WHOIS                 | Biblioteca `python-whois`                                     |
-| RDAP (domínios .br)  | [rdap.registro.br](https://rdap.registro.br) (API oficial do Registro.br/NIC.br) |
-| Dados de CNPJ         | [BrasilAPI](https://brasilapi.com.br) (dados públicos da Receita Federal) |
-
----
-
-## Roadmap / possíveis melhorias futuras
-
-- [ ] Enriquecimento de IP (ASN, organização, geolocalização, detecção de CDN/WAF).
-- [ ] Exportação do relatório também em formato JSON/CSV.
-- [ ] Paralelização das checagens quando o domínio resolve para múltiplos IPs.
-- [ ] Modo não-interativo (argumentos de linha de comando) para uso em pipelines.
+| Step                  | Source                                                        |
+|------------------------|-----------------------------------------------------------------|
+| DNS resolution         | System `nslookup` command (fallback: Python `socket`)          |
+| Availability            | System ICMP `ping` + TCP connect fallback                      |
+| WHOIS                    | `python-whois` library                                          |
+| RDAP (.br domains)      | [rdap.registro.br](https://rdap.registro.br) (official Registro.br/NIC.br API) |
+| CNPJ data                | [BrasilAPI](https://brasilapi.com.br) (public Receita Federal data) |
 
 ---
 
-## Licença
+## Roadmap / Possible Future Improvements
 
-Distribuído sob a [Licença MIT](LICENSE) — uso livre (incluindo comercial), com atribuição ao criador original.
+- [ ] IP enrichment (ASN, organization, geolocation, CDN/WAF detection).
+- [ ] Export the report in JSON/CSV format as well.
+- [ ] Parallelize availability checks when a domain resolves to multiple IPs.
+- [ ] Non-interactive mode (command-line arguments) for use in pipelines.
+
+---
+
+## License
+
+Distributed under the [MIT License](LICENSE) — free use (including commercial), with attribution to the original creator.
 
 Copyright (c) 2026 **p1r1l4mp0**
 
 ---
 
-## Autor
+## Author
 
 **IPWhoAll** — Designed for **p1r1l4mp0**

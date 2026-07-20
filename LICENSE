@@ -22,7 +22,8 @@ SOFTWARE.
 
 ---
 
-Uso responsável: esta ferramenta foi criada para fins de reconhecimento em
-testes de intrusão (pentest) autorizados. O uso contra sistemas sem
-autorização explícita do responsável é de exclusiva responsabilidade de quem
-executa o software, e pode configurar crime dependendo da jurisdição.
+Responsible use: this tool was created for reconnaissance purposes in
+authorized penetration tests. Use against systems without the explicit
+authorization of the responsible party is the sole responsibility of the
+person running the software, and may constitute a crime depending on the
+jurisdiction.

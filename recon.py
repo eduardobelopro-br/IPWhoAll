@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
 IPWhoAll - Designed for p1r1l4mp0
-Automação de reconhecimento inicial para pentest (uso autorizado apenas).
+Initial reconnaissance automation for pentesting (authorized use only).
 
-Fluxo:
-  - Solicita IP ou endereço web (domínio/URL).
-  - Se for domínio: nslookup (resolve IPs) -> ping/checagem de disponibilidade -> whois -> (se BR) CNPJ.
-  - Se for IP: ping/checagem de disponibilidade -> nslookup reverso -> whois -> (se BR) CNPJ.
-  - Ao final, oferece salvar o relatório completo em IPWhoAll/<alvo>_<timestamp>.txt
+Flow:
+  - Prompts for an IP address or web address (domain/URL).
+  - If domain: nslookup (resolves IPs) -> ping/availability check -> whois -> (if BR) CNPJ lookup.
+  - If IP: ping/availability check -> reverse nslookup -> whois -> (if BR) CNPJ lookup.
+  - At the end, offers to save the full report to IPWhoAll/<target>_<timestamp>.txt
 
-IMPORTANTE: use apenas em alvos para os quais você possua autorização
-explícita de teste (contrato de pentest, escopo assinado, etc.).
+IMPORTANT: use only against targets for which you have explicit
+testing authorization (signed pentest contract, agreed scope, etc.).
 """
 
 import io
@@ -35,62 +35,62 @@ except ImportError:
     requests = None
 
 
-def avisar_dependencias_faltando():
-    """Alerta cedo se whois/requests não estão disponíveis (ex: venv não ativado)."""
-    faltando = []
+def warn_missing_dependencies():
+    """Warns early if whois/requests are unavailable (e.g. venv not activated)."""
+    missing = []
     if whois is None:
-        faltando.append("python-whois")
+        missing.append("python-whois")
     if requests is None:
-        faltando.append("requests")
-    if faltando:
-        print("[!] Aviso: dependência(s) não encontrada(s): " + ", ".join(faltando))
-        print("    Se você criou um venv, lembre-se de ativá-lo antes de rodar o script:")
+        missing.append("requests")
+    if missing:
+        print("[!] Warning: missing dependenc(y/ies): " + ", ".join(missing))
+        print("    If you created a venv, remember to activate it before running the script:")
         print("      source ~/venvs/pentest/bin/activate")
-        print("    Depois instale o que faltar: pip install " + " ".join(faltando))
-        print("    (Whois e CNPJ ficarão indisponíveis até isso ser resolvido.)\n")
+        print("    Then install what's missing: pip install " + " ".join(missing))
+        print("    (WHOIS and CNPJ lookups will be unavailable until this is fixed.)\n")
 
 
 # ----------------------------------------------------------------------
-# Utilidades de entrada
+# Input utilities
 # ----------------------------------------------------------------------
 
-def normalizar_entrada(valor: str) -> str:
-    """Remove protocolo, caminho e porta se o usuário colar uma URL completa."""
-    valor = valor.strip()
-    if "://" in valor:
-        valor = urlparse(valor).netloc or valor
-    # remove path/porta residual (ex: dominio.com/algo ou dominio.com:8080)
-    valor = valor.split("/")[0].split(":")[0]
-    return valor
+def normalize_input(value: str) -> str:
+    """Strips protocol, path, and port if the user pastes a full URL."""
+    value = value.strip()
+    if "://" in value:
+        value = urlparse(value).netloc or value
+    # remove residual path/port (e.g. domain.com/something or domain.com:8080)
+    value = value.split("/")[0].split(":")[0]
+    return value
 
 
-def eh_ip(valor: str) -> bool:
+def is_ip(value: str) -> bool:
     try:
-        ipaddress.ip_address(valor)
+        ipaddress.ip_address(value)
         return True
     except ValueError:
         return False
 
 
-def _executar_comando(cmd: list[str], timeout: int = 15):
+def _run_command(cmd: list[str], timeout: int = 15):
     """
-    Roda um comando do sistema e retorna (codigo_retorno, saida_completa).
-    Retorna (None, None) se o comando não existir no sistema (ex: nslookup
-    não instalado), para permitir fallback via biblioteca padrão do Python.
+    Runs a system command and returns (return_code, full_output).
+    Returns (None, None) if the command isn't found on the system (e.g.
+    nslookup not installed), to allow falling back to Python's standard library.
     """
     try:
-        resultado = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        saida = (resultado.stdout or "") + (resultado.stderr or "")
-        return resultado.returncode, saida
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        output = (result.stdout or "") + (result.stderr or "")
+        return result.returncode, output
     except FileNotFoundError:
         return None, None
     except subprocess.TimeoutExpired:
-        return None, "[!] Tempo limite excedido ao executar o comando."
+        return None, "[!] Timeout exceeded while running the command."
 
 
-def _imprimir_saida_bruta(saida: str):
+def _print_raw_output(output: str):
     print("-" * 60)
-    print(saida.strip())
+    print(output.strip())
     print("-" * 60)
 
 
@@ -98,120 +98,120 @@ def _imprimir_saida_bruta(saida: str):
 # NSLOOKUP
 # ----------------------------------------------------------------------
 
-def nslookup_dominio(dominio: str) -> list[str]:
-    """Resolve um domínio para uma lista de IPs (A/AAAA), mostrando a saída
-    completa e original do comando nslookup do sistema."""
-    print(f"\n[*] Executando nslookup para {dominio} ...")
-    codigo, saida = _executar_comando(["nslookup", dominio])
+def nslookup_domain(domain: str) -> list[str]:
+    """Resolves a domain to a list of IPs (A/AAAA), showing the full,
+    original output of the system's nslookup command."""
+    print(f"\n[*] Running nslookup for {domain} ...")
+    code, output = _run_command(["nslookup", domain])
 
-    if codigo is None and saida is None:
-        print("    [!] Comando 'nslookup' não encontrado no sistema. "
-              "Usando resolução via Python (socket) como alternativa.")
+    if code is None and output is None:
+        print("    [!] 'nslookup' command not found on this system. "
+              "Falling back to Python (socket) resolution.")
         try:
-            infos = socket.getaddrinfo(dominio, None)
+            infos = socket.getaddrinfo(domain, None)
             ips = sorted({info[4][0] for info in infos})
             for ip in ips:
                 print(f"    -> {ip}")
             return ips
         except socket.gaierror as e:
-            print(f"    [!] Falha ao resolver {dominio}: {e}")
+            print(f"    [!] Failed to resolve {domain}: {e}")
             return []
 
-    _imprimir_saida_bruta(saida)
+    _print_raw_output(output)
 
-    # Extrai os IPs da seção de resposta, ignorando a linha do servidor DNS
-    # (que vem no formato "Address: x.x.x.x#53")
+    # Extract IPs from the answer section, ignoring the DNS server line
+    # (which comes in the format "Address: x.x.x.x#53")
     ips = []
-    for linha in saida.splitlines():
-        if "#" in linha:
+    for line in output.splitlines():
+        if "#" in line:
             continue
-        m = re.search(r"Address:\s*([0-9a-fA-F.:]+)", linha)
+        m = re.search(r"Address:\s*([0-9a-fA-F.:]+)", line)
         if m:
             ips.append(m.group(1))
     return sorted(set(ips))
 
 
-def nslookup_reverso(ip: str) -> str | None:
-    """Tenta resolver o PTR (nome) de um IP, mostrando a saída completa
-    do comando nslookup do sistema."""
-    print(f"\n[*] Executando nslookup reverso para {ip} ...")
-    codigo, saida = _executar_comando(["nslookup", ip])
+def reverse_nslookup(ip: str) -> str | None:
+    """Attempts to resolve the PTR (hostname) of an IP, showing the full
+    output of the system's nslookup command."""
+    print(f"\n[*] Running reverse nslookup for {ip} ...")
+    code, output = _run_command(["nslookup", ip])
 
-    if codigo is None and saida is None:
-        print("    [!] Comando 'nslookup' não encontrado no sistema. "
-              "Usando resolução via Python (socket) como alternativa.")
+    if code is None and output is None:
+        print("    [!] 'nslookup' command not found on this system. "
+              "Falling back to Python (socket) resolution.")
         try:
-            nome, _, _ = socket.gethostbyaddr(ip)
-            print(f"    -> {nome}")
-            return nome
+            name, _, _ = socket.gethostbyaddr(ip)
+            print(f"    -> {name}")
+            return name
         except socket.herror:
-            print("    [!] Nenhum registro PTR encontrado.")
+            print("    [!] No PTR record found.")
             return None
 
-    _imprimir_saida_bruta(saida)
+    _print_raw_output(output)
 
-    m = re.search(r"name\s*=\s*([^\s]+?)\.?\s*$", saida, re.MULTILINE | re.IGNORECASE)
+    m = re.search(r"name\s*=\s*([^\s]+?)\.?\s*$", output, re.MULTILINE | re.IGNORECASE)
     return m.group(1) if m else None
 
 
 # ----------------------------------------------------------------------
-# DISPONIBILIDADE (ping com fallback TCP para evadir bloqueio de ICMP)
+# AVAILABILITY (ping with TCP fallback to evade firewall/ICMP blocking)
 # ----------------------------------------------------------------------
 
-def ping_icmp(ip: str, tentativas: int = 2, timeout_s: int = 2) -> bool:
-    """Ping ICMP nativo do SO (Windows/Linux), mostrando a saída completa."""
+def icmp_ping(ip: str, attempts: int = 2, timeout_s: int = 2) -> bool:
+    """Native OS ICMP ping (Windows/Linux), showing the full output."""
     flag_count = "-n" if sys.platform.startswith("win") else "-c"
     flag_timeout = "-w" if sys.platform.startswith("win") else "-W"
     timeout_val = str(timeout_s * 1000) if sys.platform.startswith("win") else str(timeout_s)
 
-    cmd = ["ping", flag_count, str(tentativas), flag_timeout, timeout_val, ip]
+    cmd = ["ping", flag_count, str(attempts), flag_timeout, timeout_val, ip]
     try:
-        resultado = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-        saida = (resultado.stdout or "") + (resultado.stderr or "")
-        if saida.strip():
-            _imprimir_saida_bruta(saida)
-        return resultado.returncode == 0
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        output = (result.stdout or "") + (result.stderr or "")
+        if output.strip():
+            _print_raw_output(output)
+        return result.returncode == 0
     except FileNotFoundError:
-        print("    [!] Comando 'ping' não encontrado no sistema.")
+        print("    [!] 'ping' command not found on this system.")
         return False
     except subprocess.TimeoutExpired:
-        print("    [!] Tempo limite excedido ao executar o ping.")
+        print("    [!] Timeout exceeded while running ping.")
         return False
 
 
-def checar_tcp(ip: str, portas: list[int] = None, timeout_s: float = 2.0) -> int | None:
-    """Fallback: tenta conectar via TCP em portas comuns (evade bloqueio de ICMP).
-    Mostra o resultado de cada tentativa de porta."""
-    if portas is None:
-        portas = [443, 80, 22, 3389, 21, 25, 8080]
-    for porta in portas:
+def check_tcp(ip: str, ports: list[int] = None, timeout_s: float = 2.0) -> int | None:
+    """Fallback: attempts to connect via TCP on common ports (evades ICMP
+    blocking). Shows the result of each port attempt."""
+    if ports is None:
+        ports = [443, 80, 22, 3389, 21, 25, 8080]
+    for port in ports:
         try:
-            with socket.create_connection((ip, porta), timeout=timeout_s):
-                print(f"    -> Porta TCP {porta}: ABERTA (host responde)")
-                return porta
+            with socket.create_connection((ip, port), timeout=timeout_s):
+                print(f"    -> TCP port {port}: OPEN (host responds)")
+                return port
         except socket.timeout:
-            print(f"    -> Porta TCP {porta}: sem resposta (timeout)")
+            print(f"    -> TCP port {port}: no response (timeout)")
         except ConnectionRefusedError:
-            print(f"    -> Porta TCP {porta}: fechada (conexão recusada)")
+            print(f"    -> TCP port {port}: closed (connection refused)")
         except OSError as e:
-            print(f"    -> Porta TCP {porta}: erro ({e})")
+            print(f"    -> TCP port {port}: error ({e})")
     return None
 
 
-def verificar_disponibilidade(ip: str) -> bool:
-    print(f"\n[*] Verificando disponibilidade de {ip} ...")
-    if ping_icmp(ip):
-        print("    -> Host respondeu ao ping ICMP (online).")
+def check_availability(ip: str) -> bool:
+    print(f"\n[*] Checking availability of {ip} ...")
+    if icmp_ping(ip):
+        print("    -> Host responded to ICMP ping (online).")
         return True
 
-    print("    [!] Sem resposta ICMP (possível bloqueio de firewall).")
-    print("    [*] Tentando fallback via TCP connect em portas comuns...")
-    porta_aberta = checar_tcp(ip)
-    if porta_aberta:
-        print(f"    -> Host respondeu na porta TCP {porta_aberta} (online, ICMP bloqueado).")
+    print("    [!] No ICMP response (possible firewall blocking).")
+    print("    [*] Trying TCP connect fallback on common ports...")
+    open_port = check_tcp(ip)
+    if open_port:
+        print(f"    -> Host responded on TCP port {open_port} (online, ICMP blocked).")
         return True
 
-    print("    [!] Nenhuma resposta via ICMP ou TCP nas portas testadas.")
+    print("    [!] No response via ICMP or TCP on the tested ports.")
     return False
 
 
@@ -219,103 +219,103 @@ def verificar_disponibilidade(ip: str) -> bool:
 # WHOIS
 # ----------------------------------------------------------------------
 
-def executar_whois(alvo: str):
-    print(f"\n[*] Executando whois para {alvo} ...")
+def run_whois(target: str):
+    print(f"\n[*] Running whois for {target} ...")
     if whois is None:
-        print("    [!] Biblioteca 'python-whois' não instalada. Rode: pip install python-whois")
+        print("    [!] 'python-whois' library not installed. Run: pip install python-whois")
         return None
     try:
-        dados = whois.whois(alvo)
+        data = whois.whois(target)
 
-        # Preferimos o texto bruto (retorno completo e original do servidor WHOIS)
-        texto_bruto = getattr(dados, "text", None)
+        # Prefer the raw text (full, original response from the WHOIS server)
+        raw_text = getattr(data, "text", None)
         print("-" * 60)
-        if texto_bruto:
-            print(texto_bruto.strip())
+        if raw_text:
+            print(raw_text.strip())
         else:
-            # Fallback: alguns parsers não expõem .text; despeja todos os campos disponíveis
-            campos = dados.keys() if hasattr(dados, "keys") else vars(dados).keys()
-            for campo in campos:
-                valor = dados.get(campo) if hasattr(dados, "get") else getattr(dados, campo, None)
-                if valor:
-                    print(f"{campo}: {valor}")
+            # Fallback: some parsers don't expose .text; dump all available fields
+            fields = data.keys() if hasattr(data, "keys") else vars(data).keys()
+            for field in fields:
+                value = data.get(field) if hasattr(data, "get") else getattr(data, field, None)
+                if value:
+                    print(f"{field}: {value}")
         print("-" * 60)
 
-        return dados
+        return data
     except Exception as e:
-        print(f"    [!] Falha ao consultar whois: {e}")
+        print(f"    [!] Failed to query whois: {e}")
         return None
 
 
-def parece_empresa_brasileira(alvo: str, dados_whois) -> bool:
-    if alvo.endswith(".br"):
+def looks_like_brazilian_company(target: str, whois_data) -> bool:
+    if target.endswith(".br"):
         return True
-    if dados_whois is None:
+    if whois_data is None:
         return False
-    texto = str(dados_whois).lower()
-    return "brazil" in texto or " br\n" in texto or "country: br" in texto or ".br" in texto
+    text = str(whois_data).lower()
+    return "brazil" in text or " br\n" in text or "country: br" in text or ".br" in text
 
 
-def formatar_cnpj(digitos: str) -> str:
-    return f"{digitos[0:2]}.{digitos[2:5]}.{digitos[5:8]}/{digitos[8:12]}-{digitos[12:14]}"
+def format_cnpj(digits: str) -> str:
+    return f"{digits[0:2]}.{digits[2:5]}.{digits[5:8]}/{digits[8:12]}-{digits[12:14]}"
 
 
-def _vcard_get(vcard_array, campo: str) -> str | None:
-    """Extrai um campo (ex: 'fn', 'email') de um vcardArray no formato RDAP."""
+def _vcard_get(vcard_array, field: str) -> str | None:
+    """Extracts a field (e.g. 'fn', 'email') from an RDAP-format vcardArray."""
     if not vcard_array or len(vcard_array) < 2:
         return None
     for item in vcard_array[1]:
-        if len(item) >= 4 and item[0] == campo:
-            valor = item[3]
-            if isinstance(valor, list):
-                valor = " ".join(v for v in valor if v)
-            return valor or None
+        if len(item) >= 4 and item[0] == field:
+            value = item[3]
+            if isinstance(value, list):
+                value = " ".join(v for v in value if v)
+            return value or None
     return None
 
 
-def _formatar_data(data_iso: str) -> str:
-    """Converte '2007-06-28T11:20:03Z' em '28/06/2007 11:20:03'."""
-    if not data_iso:
-        return data_iso
+def _format_date(iso_date: str) -> str:
+    """Converts '2007-06-28T11:20:03Z' into '06/28/2007 11:20:03'."""
+    if not iso_date:
+        return iso_date
     try:
-        limpo = data_iso.replace("Z", "")
-        data, hora = limpo.split("T")
-        ano, mes, dia = data.split("-")
-        return f"{dia}/{mes}/{ano} {hora}"
+        cleaned = iso_date.replace("Z", "")
+        date, time = cleaned.split("T")
+        year, month, day = date.split("-")
+        return f"{month}/{day}/{year} {time}"
     except (ValueError, AttributeError):
-        return data_iso
+        return iso_date
 
 
-def imprimir_rdap_formatado(dados: dict):
-    """Exibe o retorno do RDAP do Registro.br em formato legível,
-    preservando todas as informações (sem resumir)."""
+def print_formatted_rdap(data: dict):
+    """Displays the Registro.br RDAP response in a readable format,
+    preserving all information (no summarizing)."""
     print("-" * 60)
-    print(f"Domínio: {dados.get('ldhName', '-')}")
-    print(f"Status: {', '.join(dados.get('status', [])) or '-'}")
+    print(f"Domain: {data.get('ldhName', '-')}")
+    print(f"Status: {', '.join(data.get('status', [])) or '-'}")
 
-    eventos = dados.get("events", [])
-    if eventos:
-        print("\nEventos do domínio:")
-        for ev in eventos:
-            print(f"  - {ev.get('eventAction', '-')}: {_formatar_data(ev.get('eventDate', '-'))}")
+    events = data.get("events", [])
+    if events:
+        print("\nDomain events:")
+        for ev in events:
+            print(f"  - {ev.get('eventAction', '-')}: {_format_date(ev.get('eventDate', '-'))}")
 
-    nameservers = dados.get("nameservers", [])
+    nameservers = data.get("nameservers", [])
     if nameservers:
-        print("\nServidores DNS (nameservers):")
+        print("\nName servers:")
         for ns in nameservers:
             print(f"  - {ns.get('ldhName', '-')}")
 
-    secure_dns = dados.get("secureDNS", {})
+    secure_dns = data.get("secureDNS", {})
     if secure_dns:
-        print(f"\nDNSSEC habilitado: {'Sim' if secure_dns.get('delegationSigned') else 'Não'}")
+        print(f"\nDNSSEC enabled: {'Yes' if secure_dns.get('delegationSigned') else 'No'}")
 
-    entidades = dados.get("entities", [])
-    if entidades:
-        print("\nEntidades relacionadas ao domínio:")
-        for ent in entidades:
-            nome = _vcard_get(ent.get("vcardArray"), "fn") or "-"
-            papel = ", ".join(ent.get("roles", [])) or "-"
-            print(f"\n  [{papel.upper()}] {nome}")
+    entities = data.get("entities", [])
+    if entities:
+        print("\nEntities related to the domain:")
+        for ent in entities:
+            name = _vcard_get(ent.get("vcardArray"), "fn") or "-"
+            role = ", ".join(ent.get("roles", [])) or "-"
+            print(f"\n  [{role.upper()}] {name}")
             print(f"    Handle: {ent.get('handle', '-')}")
 
             for pid in ent.get("publicIds", []):
@@ -323,166 +323,166 @@ def imprimir_rdap_formatado(dados: dict):
 
             email = _vcard_get(ent.get("vcardArray"), "email")
             if email:
-                print(f"    E-mail: {email}")
+                print(f"    Email: {email}")
 
             for ev in ent.get("events", []):
-                print(f"    Evento ({ev.get('eventAction', '-')}): {_formatar_data(ev.get('eventDate', '-'))}")
+                print(f"    Event ({ev.get('eventAction', '-')}): {_format_date(ev.get('eventDate', '-'))}")
 
-            # Sub-entidades (ex: contato administrativo/técnico dentro do registrante)
+            # Sub-entities (e.g. administrative/technical contact within the registrant)
             for sub in ent.get("entities", []):
-                sub_nome = _vcard_get(sub.get("vcardArray"), "fn") or "-"
-                sub_papel = ", ".join(sub.get("roles", [])) or "-"
+                sub_name = _vcard_get(sub.get("vcardArray"), "fn") or "-"
+                sub_role = ", ".join(sub.get("roles", [])) or "-"
                 sub_email = _vcard_get(sub.get("vcardArray"), "email")
-                print(f"      -> [{sub_papel.upper()}] {sub_nome}" + (f" ({sub_email})" if sub_email else ""))
+                print(f"      -> [{sub_role.upper()}] {sub_name}" + (f" ({sub_email})" if sub_email else ""))
 
     print("-" * 60)
 
 
-def rdap_registro_br(dominio: str) -> str | None:
+def rdap_registro_br(domain: str) -> str | None:
     """
-    Consulta o RDAP oficial do Registro.br (substituto moderno e estruturado
-    do WHOIS para domínios .br). Retorna dados em JSON, incluindo o CNPJ/CPF
-    do titular do domínio no campo 'publicIds' — muito mais confiável do
-    que extrair via regex de texto livre.
-    Doc: https://rdap.registro.br
+    Queries the official Registro.br RDAP service (a modern, structured
+    replacement for WHOIS on .br domains). Returns JSON data, including the
+    CNPJ/CPF of the domain holder in the 'publicIds' field — far more
+    reliable than extracting it via regex from free-form text.
+    Docs: https://rdap.registro.br
     """
-    if requests is None or not dominio.endswith(".br"):
+    if requests is None or not domain.endswith(".br"):
         return None
 
-    url = f"https://rdap.registro.br/domain/{dominio}"
-    print(f"\n[*] Consultando RDAP oficial do Registro.br para {dominio} ...")
+    url = f"https://rdap.registro.br/domain/{domain}"
+    print(f"\n[*] Querying the official Registro.br RDAP for {domain} ...")
     try:
         resp = requests.get(url, timeout=10)
         if resp.status_code != 200:
-            print(f"    [!] RDAP não retornou dados (status {resp.status_code}).")
+            print(f"    [!] RDAP did not return data (status {resp.status_code}).")
             return None
-        dados = resp.json()
+        data = resp.json()
 
-        imprimir_rdap_formatado(dados)
+        print_formatted_rdap(data)
 
-        for entidade in dados.get("entities", []):
-            for pid in entidade.get("publicIds", []):
+        for entity in data.get("entities", []):
+            for pid in entity.get("publicIds", []):
                 if pid.get("type", "").lower() == "cnpj":
-                    digitos = re.sub(r"\D", "", pid.get("identifier", ""))
-                    if len(digitos) == 14:
-                        return formatar_cnpj(digitos)
-        print("    [!] Nenhum CNPJ foi encontrado nas entidades retornadas pelo RDAP.")
+                    digits = re.sub(r"\D", "", pid.get("identifier", ""))
+                    if len(digits) == 14:
+                        return format_cnpj(digits)
+        print("    [!] No CNPJ was found among the entities returned by RDAP.")
         return None
     except (requests.RequestException, ValueError) as e:
-        print(f"    [!] Falha ao consultar RDAP: {e}")
+        print(f"    [!] Failed to query RDAP: {e}")
         return None
 
 
-def extrair_cnpj(dados_whois) -> str | None:
+def extract_cnpj(whois_data) -> str | None:
     """
-    Fallback: tenta extrair um CNPJ do retorno bruto do WHOIS via regex,
-    usado apenas quando o RDAP do Registro.br não está disponível ou
-    não retornou resultado (ex: domínio não é .br).
+    Fallback: attempts to extract a CNPJ from the raw WHOIS response via
+    regex, used only when Registro.br RDAP is unavailable or returned
+    nothing (e.g. the domain isn't .br).
     """
-    if dados_whois is None:
+    if whois_data is None:
         return None
 
-    texto = getattr(dados_whois, "text", None) or str(dados_whois)
+    text = getattr(whois_data, "text", None) or str(whois_data)
 
-    # 1) Padrão formatado explícito em qualquer lugar do texto (mais confiável)
-    m = re.search(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}", texto)
+    # 1) Explicit formatted pattern anywhere in the text (most reliable)
+    m = re.search(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}", text)
     if m:
         return m.group(0)
 
-    # 2) Linhas com rótulos que costumam conter CNPJ (registro.br: ownerid)
-    for linha in texto.splitlines():
-        if re.search(r"ownerid|owner-id|owner id|cnpj", linha, re.IGNORECASE):
-            digitos = re.sub(r"\D", "", linha)
-            if len(digitos) == 14:
-                return formatar_cnpj(digitos)
+    # 2) Lines with labels that usually contain a CNPJ (registro.br: ownerid)
+    for line in text.splitlines():
+        if re.search(r"ownerid|owner-id|owner id|cnpj", line, re.IGNORECASE):
+            digits = re.sub(r"\D", "", line)
+            if len(digits) == 14:
+                return format_cnpj(digits)
 
     return None
 
 
-def imprimir_cnpj_formatado(dados: dict):
-    """Exibe o retorno da BrasilAPI (CNPJ) em formato legível,
-    preservando todas as informações (sem resumir)."""
+def print_formatted_cnpj(data: dict):
+    """Displays the BrasilAPI (CNPJ) response in a readable format,
+    preserving all information (no summarizing)."""
     print("-" * 60)
-    print(f"Razão Social: {dados.get('razao_social', '-')}")
-    if dados.get("nome_fantasia"):
-        print(f"Nome Fantasia: {dados.get('nome_fantasia')}")
-    print(f"CNPJ: {formatar_cnpj(str(dados.get('cnpj', '')))}")
-    print(f"Situação Cadastral: {dados.get('descricao_situacao_cadastral', '-')} "
-          f"(desde {dados.get('data_situacao_cadastral', '-')}, "
-          f"motivo: {dados.get('descricao_motivo_situacao_cadastral', '-')})")
-    print(f"Matriz/Filial: {dados.get('descricao_identificador_matriz_filial', '-')}")
-    print(f"Data de Início de Atividade: {dados.get('data_inicio_atividade', '-')}")
-    print(f"Natureza Jurídica: {dados.get('natureza_juridica', '-')}")
-    print(f"Porte: {dados.get('porte', '-')}")
-    print(f"Capital Social: R$ {dados.get('capital_social', 0):,}".replace(",", "."))
-    print(f"Opção pelo Simples: {'Sim' if dados.get('opcao_pelo_simples') else 'Não'}"
-          + (f" (desde {dados.get('data_opcao_pelo_simples')})" if dados.get('data_opcao_pelo_simples') else ""))
-    print(f"Opção pelo MEI: {'Sim' if dados.get('opcao_pelo_mei') else 'Não'}")
+    print(f"Legal Name: {data.get('razao_social', '-')}")
+    if data.get("nome_fantasia"):
+        print(f"Trade Name: {data.get('nome_fantasia')}")
+    print(f"CNPJ: {format_cnpj(str(data.get('cnpj', '')))}")
+    print(f"Registration Status: {data.get('descricao_situacao_cadastral', '-')} "
+          f"(since {data.get('data_situacao_cadastral', '-')}, "
+          f"reason: {data.get('descricao_motivo_situacao_cadastral', '-')})")
+    print(f"Headquarters/Branch: {data.get('descricao_identificador_matriz_filial', '-')}")
+    print(f"Business Start Date: {data.get('data_inicio_atividade', '-')}")
+    print(f"Legal Nature: {data.get('natureza_juridica', '-')}")
+    print(f"Size: {data.get('porte', '-')}")
+    print(f"Share Capital: R$ {data.get('capital_social', 0):,}".replace(",", "."))
+    print(f"Simples Nacional Opt-in: {'Yes' if data.get('opcao_pelo_simples') else 'No'}"
+          + (f" (since {data.get('data_opcao_pelo_simples')})" if data.get('data_opcao_pelo_simples') else ""))
+    print(f"MEI Opt-in: {'Yes' if data.get('opcao_pelo_mei') else 'No'}")
 
-    print(f"\nAtividade Principal (CNAE {dados.get('cnae_fiscal', '-')}): "
-          f"{dados.get('cnae_fiscal_descricao', '-')}")
+    print(f"\nPrimary Activity (CNAE {data.get('cnae_fiscal', '-')}): "
+          f"{data.get('cnae_fiscal_descricao', '-')}")
 
-    secundarios = dados.get("cnaes_secundarios", [])
-    if secundarios:
-        print(f"\nAtividades Secundárias ({len(secundarios)}):")
-        for cnae in secundarios:
+    secondary = data.get("cnaes_secundarios", [])
+    if secondary:
+        print(f"\nSecondary Activities ({len(secondary)}):")
+        for cnae in secondary:
             print(f"  - [{cnae.get('codigo')}] {cnae.get('descricao')}")
 
-    print(f"\nEndereço: {dados.get('descricao_tipo_de_logradouro', '')} "
-          f"{dados.get('logradouro', '-')}, {dados.get('numero', '-')} "
-          f"{dados.get('complemento', '')}".rstrip())
-    print(f"Bairro: {dados.get('bairro', '-')}")
-    print(f"Município/UF: {dados.get('municipio', '-')}/{dados.get('uf', '-')}")
-    print(f"CEP: {dados.get('cep', '-')}")
+    print(f"\nAddress: {data.get('descricao_tipo_de_logradouro', '')} "
+          f"{data.get('logradouro', '-')}, {data.get('numero', '-')} "
+          f"{data.get('complemento', '')}".rstrip())
+    print(f"Neighborhood: {data.get('bairro', '-')}")
+    print(f"City/State: {data.get('municipio', '-')}/{data.get('uf', '-')}")
+    print(f"ZIP Code: {data.get('cep', '-')}")
 
-    telefones = [t for t in [dados.get('ddd_telefone_1'), dados.get('ddd_telefone_2')] if t]
-    print(f"Telefone(s): {', '.join(telefones) if telefones else '-'}")
-    print(f"E-mail: {dados.get('email') or '-'}")
+    phones = [t for t in [data.get('ddd_telefone_1'), data.get('ddd_telefone_2')] if t]
+    print(f"Phone(s): {', '.join(phones) if phones else '-'}")
+    print(f"Email: {data.get('email') or '-'}")
 
-    regimes = dados.get("regime_tributario", [])
-    if regimes:
-        print(f"\nRegime Tributário:")
-        for r in regimes:
+    tax_regimes = data.get("regime_tributario", [])
+    if tax_regimes:
+        print(f"\nTax Regime:")
+        for r in tax_regimes:
             print(f"  - {r.get('ano')}: {r.get('forma_de_tributacao')} "
-                  f"({r.get('quantidade_de_escrituracoes')} escrituração(ões))")
+                  f"({r.get('quantidade_de_escrituracoes')} filing(s))")
 
-    qsa = dados.get("qsa", [])
-    if qsa:
-        print(f"\nQuadro de Sócios e Administradores (QSA) ({len(qsa)}):")
-        for socio in qsa:
-            print(f"  - {socio.get('nome_socio', '-')} | {socio.get('qualificacao_socio', '-')} "
-                  f"| entrada: {socio.get('data_entrada_sociedade', '-')} "
-                  f"| faixa etária: {socio.get('faixa_etaria', '-')}")
+    partners = data.get("qsa", [])
+    if partners:
+        print(f"\nPartners/Officers (QSA) ({len(partners)}):")
+        for partner in partners:
+            print(f"  - {partner.get('nome_socio', '-')} | {partner.get('qualificacao_socio', '-')} "
+                  f"| joined: {partner.get('data_entrada_sociedade', '-')} "
+                  f"| age range: {partner.get('faixa_etaria', '-')}")
 
     print("-" * 60)
 
 
-def buscar_cnpj(cnpj: str):
-    print(f"\n[*] Consultando CNPJ {cnpj} na BrasilAPI ...")
+def lookup_cnpj(cnpj: str):
+    print(f"\n[*] Looking up CNPJ {cnpj} on BrasilAPI ...")
     if requests is None:
-        print("    [!] Biblioteca 'requests' não instalada. Rode: pip install requests")
+        print("    [!] 'requests' library not installed. Run: pip install requests")
         return
-    cnpj_limpo = re.sub(r"\D", "", cnpj)
-    url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_limpo}"
+    clean_cnpj = re.sub(r"\D", "", cnpj)
+    url = f"https://brasilapi.com.br/api/cnpj/v1/{clean_cnpj}"
     try:
         resp = requests.get(url, timeout=10)
         if resp.status_code == 200:
-            dados = resp.json()
-            imprimir_cnpj_formatado(dados)
+            data = resp.json()
+            print_formatted_cnpj(data)
         else:
-            print(f"    [!] CNPJ não encontrado ou inválido (status {resp.status_code}).")
+            print(f"    [!] CNPJ not found or invalid (status {resp.status_code}).")
     except requests.RequestException as e:
-        print(f"    [!] Erro ao consultar BrasilAPI: {e}")
+        print(f"    [!] Error querying BrasilAPI: {e}")
 
 
 # ----------------------------------------------------------------------
-# CAPTURA DE SAÍDA E SALVAMENTO DE RELATÓRIO
+# OUTPUT CAPTURE AND REPORT SAVING
 # ----------------------------------------------------------------------
 
 class Tee:
-    """Espelha tudo que é impresso simultaneamente para o terminal e
-    para um buffer em memória, permitindo salvar o relatório completo
-    da sessão em arquivo ao final, sem alterar nenhum print() existente."""
+    """Mirrors everything printed simultaneously to the terminal and to
+    an in-memory buffer, allowing the full session report to be saved to
+    a file at the end without altering any existing print() calls."""
 
     def __init__(self, *streams):
         self.streams = streams
@@ -496,152 +496,152 @@ class Tee:
             s.flush()
 
 
-def escolher_diretorio_base() -> str:
-    """Pergunta ao usuário onde a pasta IPWhoAll deve ser criada.
-    Detecta se ~/Documents existe para oferecê-lo como opção."""
-    diretorio_atual = os.getcwd()
+def choose_base_directory() -> str:
+    """Asks the user where the IPWhoAll folder should be created.
+    Detects whether ~/Documents exists to offer it as an option."""
+    current_dir = os.getcwd()
     documents = os.path.expanduser("~/Documents")
-    documents_existe = os.path.isdir(documents)
+    documents_exists = os.path.isdir(documents)
 
-    print("\nOnde deseja salvar o relatório?")
-    print(f"  1) Pasta atual ({diretorio_atual})")
-    if documents_existe:
+    print("\nWhere would you like to save the report?")
+    print(f"  1) Current folder ({current_dir})")
+    if documents_exists:
         print(f"  2) Documents ({documents})")
     else:
-        print(f"  2) Documents ({documents}) [não encontrado, será criado se escolhido]")
+        print(f"  2) Documents ({documents}) [not found, will be created if chosen]")
 
-    escolha = input("Escolha uma opção (1/2) [padrão: 1]: ").strip()
-    return documents if escolha == "2" else diretorio_atual
+    choice = input("Choose an option (1/2) [default: 1]: ").strip()
+    return documents if choice == "2" else current_dir
 
 
-def escolher_nome_arquivo(alvo: str) -> str:
-    """Pergunta ao usuário o nome do arquivo de relatório.
-    Se deixado em branco, usa um nome padrão baseado no alvo + timestamp."""
-    alvo_sanitizado = re.sub(r'[<>:"/\\|?*]', "_", alvo)
+def choose_file_name(target: str) -> str:
+    """Asks the user for the report file name.
+    If left blank, uses a default name based on the target + timestamp."""
+    sanitized_target = re.sub(r'[<>:"/\\|?*]', "_", target)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    nome_padrao = f"{alvo_sanitizado}_{timestamp}"
+    default_name = f"{sanitized_target}_{timestamp}"
 
-    nome_digitado = input(
-        f"\nNome do arquivo (Enter para usar o padrão '{nome_padrao}.txt'): "
+    typed_name = input(
+        f"\nFile name (press Enter to use the default '{default_name}.txt'): "
     ).strip()
 
-    if not nome_digitado:
-        nome_final = nome_padrao
+    if not typed_name:
+        final_name = default_name
     else:
-        nome_final = re.sub(r'[<>:"/\\|?*]', "_", nome_digitado)
+        final_name = re.sub(r'[<>:"/\\|?*]', "_", typed_name)
 
-    if not nome_final.lower().endswith(".txt"):
-        nome_final += ".txt"
+    if not final_name.lower().endswith(".txt"):
+        final_name += ".txt"
 
-    return nome_final
+    return final_name
 
 
-def salvar_relatorio(conteudo: str, nome_arquivo: str, diretorio_base: str = None) -> str:
-    """Cria (se necessário) a pasta IPWhoAll dentro do diretório base
-    escolhido e salva o relatório da pesquisa com o nome de arquivo informado."""
-    if diretorio_base is None:
-        diretorio_base = os.getcwd()
+def save_report(content: str, file_name: str, base_directory: str = None) -> str:
+    """Creates (if needed) the IPWhoAll folder inside the chosen base
+    directory and saves the recon report under the given file name."""
+    if base_directory is None:
+        base_directory = os.getcwd()
 
-    pasta = os.path.join(diretorio_base, "IPWhoAll")
-    if not os.path.isdir(pasta):
-        os.makedirs(pasta)
-        print(f"[+] Pasta '{pasta}' criada.")
+    folder = os.path.join(base_directory, "IPWhoAll")
+    if not os.path.isdir(folder):
+        os.makedirs(folder)
+        print(f"[+] Folder '{folder}' created.")
     else:
-        print(f"[i] Pasta '{pasta}' já existe. Criando apenas o arquivo.")
+        print(f"[i] Folder '{folder}' already exists. Creating the file only.")
 
-    caminho = os.path.join(pasta, nome_arquivo)
+    path = os.path.join(folder, file_name)
 
-    with open(caminho, "w", encoding="utf-8") as f:
-        f.write(conteudo)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
 
-    caminho_absoluto = os.path.abspath(caminho)
-    print(f"[+] Relatório salvo em: {caminho_absoluto}")
-    return caminho_absoluto
+    absolute_path = os.path.abspath(path)
+    print(f"[+] Report saved to: {absolute_path}")
+    return absolute_path
 
 
 # ----------------------------------------------------------------------
-# FLUXO PRINCIPAL
+# MAIN FLOW
 # ----------------------------------------------------------------------
 
 def main():
-    saida_original = sys.stdout
+    original_stdout = sys.stdout
     buffer = io.StringIO()
-    sys.stdout = Tee(saida_original, buffer)
+    sys.stdout = Tee(original_stdout, buffer)
 
     try:
         print("=" * 60)
         print(" IPWhoAll")
         print(" Designed for p1r1l4mp0")
-        print(" Automação de Reconhecimento Inicial - Pentest")
-        print(" (uso restrito a alvos com autorização formal de teste)")
+        print(" Initial Reconnaissance Automation - Pentest")
+        print(" (restricted to targets with formal testing authorization)")
         print("=" * 60)
 
-        avisar_dependencias_faltando()
+        warn_missing_dependencies()
 
-        entrada_bruta = input("\nInforme o IP ou endereço web (domínio/URL) do alvo: ").strip()
-        if not entrada_bruta:
-            print("Entrada vazia. Encerrando.")
+        raw_input_value = input("\nEnter the target's IP or web address (domain/URL): ").strip()
+        if not raw_input_value:
+            print("Empty input. Exiting.")
             return
 
-        alvo = normalizar_entrada(entrada_bruta)
-        dados_whois = None
-        dominio_disponivel = None  # usado para consulta RDAP (registro.br)
+        target = normalize_input(raw_input_value)
+        whois_data = None
+        resolved_domain = None  # used for RDAP lookup (registro.br)
 
-        if eh_ip(alvo):
-            print(f"\n[+] Entrada identificada como IP: {alvo}")
-            online = verificar_disponibilidade(alvo)
-            dominio_disponivel = nslookup_reverso(alvo)  # PTR, se existir
-            alvo_whois = alvo
+        if is_ip(target):
+            print(f"\n[+] Input identified as an IP: {target}")
+            online = check_availability(target)
+            resolved_domain = reverse_nslookup(target)  # PTR, if it exists
+            whois_target = target
         else:
-            print(f"\n[+] Entrada identificada como endereço web (domínio): {alvo}")
-            ips = nslookup_dominio(alvo)
+            print(f"\n[+] Input identified as a web address (domain): {target}")
+            ips = nslookup_domain(target)
             if ips:
                 for ip in ips:
-                    verificar_disponibilidade(ip)
+                    check_availability(ip)
             else:
-                print("    [!] Não foi possível resolver IPs; pulando checagem de disponibilidade.")
-            alvo_whois = alvo  # whois de domínio costuma ser mais informativo que de IP
-            dominio_disponivel = alvo
+                print("    [!] Could not resolve any IPs; skipping availability check.")
+            whois_target = target  # domain whois tends to be more informative than IP whois
+            resolved_domain = target
 
-        # A partir daqui o fluxo é unificado para IP e domínio
-        dados_whois = executar_whois(alvo_whois)
+        # From here on, the flow is unified for IP and domain
+        whois_data = run_whois(whois_target)
 
-        if parece_empresa_brasileira(alvo_whois, dados_whois):
-            print("\n[+] Indícios de empresa/domínio brasileiro (.br) detectados.")
+        if looks_like_brazilian_company(whois_target, whois_data):
+            print("\n[+] Signs of a Brazilian company/domain (.br) detected.")
 
-            cnpj_extraido = None
-            if dominio_disponivel and dominio_disponivel.endswith(".br"):
-                cnpj_extraido = rdap_registro_br(dominio_disponivel)
+            extracted_cnpj = None
+            if resolved_domain and resolved_domain.endswith(".br"):
+                extracted_cnpj = rdap_registro_br(resolved_domain)
 
-            if not cnpj_extraido:
-                cnpj_extraido = extrair_cnpj(dados_whois)
-                if cnpj_extraido:
-                    print(f"[+] CNPJ extraído do texto do WHOIS: {cnpj_extraido}")
+            if not extracted_cnpj:
+                extracted_cnpj = extract_cnpj(whois_data)
+                if extracted_cnpj:
+                    print(f"[+] CNPJ extracted from WHOIS text: {extracted_cnpj}")
 
-            if cnpj_extraido:
-                buscar_cnpj(cnpj_extraido)
+            if extracted_cnpj:
+                lookup_cnpj(extracted_cnpj)
             else:
-                print("[i] Não foi possível extrair um CNPJ automaticamente (nem via RDAP, nem via WHOIS).")
-                resposta = input("Informe o CNPJ manualmente (ou Enter para pular): ").strip()
-                if resposta:
-                    buscar_cnpj(resposta)
+                print("[i] Could not automatically extract a CNPJ (neither via RDAP nor WHOIS).")
+                answer = input("Enter the CNPJ manually (or press Enter to skip): ").strip()
+                if answer:
+                    lookup_cnpj(answer)
         else:
-            print("\n[i] Não foram encontrados indícios claros de empresa brasileira via whois/domínio.")
+            print("\n[i] No clear signs of a Brazilian company found via whois/domain.")
 
-        print("\n[✓] Reconhecimento concluído.")
+        print("\n[\u2713] Reconnaissance complete.")
 
-        resposta_salvar = input(
-            "\nDeseja salvar os dados encontrados em um arquivo? (s/n): "
+        save_answer = input(
+            "\nWould you like to save the findings to a file? (y/n): "
         ).strip().lower()
-        if resposta_salvar.startswith("s"):
-            diretorio_escolhido = escolher_diretorio_base()
-            nome_arquivo_escolhido = escolher_nome_arquivo(alvo)
-            salvar_relatorio(buffer.getvalue(), nome_arquivo_escolhido, diretorio_escolhido)
+        if save_answer.startswith("y"):
+            chosen_directory = choose_base_directory()
+            chosen_file_name = choose_file_name(target)
+            save_report(buffer.getvalue(), chosen_file_name, chosen_directory)
         else:
-            print("[i] Relatório não salvo.")
+            print("[i] Report not saved.")
 
     finally:
-        sys.stdout = saida_original
+        sys.stdout = original_stdout
 
 
 if __name__ == "__main__":
