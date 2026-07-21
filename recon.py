@@ -216,6 +216,166 @@ def check_availability(ip: str) -> bool:
 
 
 # ----------------------------------------------------------------------
+# IP ENRICHMENT (ASN, organization, geolocation, CDN/WAF detection)
+# ----------------------------------------------------------------------
+
+# Keywords found in org/ISP/ASN names that indicate a known CDN or WAF
+# provider is fronting the target.
+KNOWN_CDN_WAF_PROVIDERS = {
+    "cloudflare": "Cloudflare",
+    "akamai": "Akamai",
+    "fastly": "Fastly",
+    "cloudfront": "Amazon CloudFront",
+    "amazon.com": "Amazon (AWS)",
+    "amazon technologies": "Amazon (AWS)",
+    "imperva": "Imperva Incapsula",
+    "incapsula": "Imperva Incapsula",
+    "sucuri": "Sucuri",
+    "stackpath": "StackPath",
+    "highwinds": "StackPath (Highwinds)",
+    "google cloud": "Google Cloud CDN",
+    "googleusercontent": "Google Cloud CDN",
+    "microsoft azure": "Azure CDN/Front Door",
+    "azure": "Azure CDN/Front Door",
+    "edgecast": "Edgecast (Verizon Media)",
+    "limelight": "Limelight Networks",
+    "keycdn": "KeyCDN",
+    "cachefly": "CacheFly",
+    "cdn77": "CDN77",
+    "quic.cloud": "QUIC.cloud",
+}
+
+# HTTP response headers that reveal a specific CDN/WAF provider.
+CDN_WAF_HEADER_SIGNATURES = {
+    "cf-ray": "Cloudflare",
+    "cf-cache-status": "Cloudflare",
+    "x-amz-cf-id": "Amazon CloudFront",
+    "x-amz-cf-pop": "Amazon CloudFront",
+    "x-akamai-transformed": "Akamai",
+    "akamai-origin-hop": "Akamai",
+    "x-sucuri-id": "Sucuri",
+    "x-sucuri-cache": "Sucuri",
+    "x-iinfo": "Imperva Incapsula",
+    "x-cdn": "Generic CDN",
+    "x-served-by": "Fastly",
+    "x-fastly-request-id": "Fastly",
+    "x-azure-ref": "Azure Front Door/CDN",
+    "x-msedge-ref": "Azure Front Door",
+}
+
+# Substrings looked for in the "Server" header.
+CDN_WAF_SERVER_SIGNATURES = {
+    "cloudflare": "Cloudflare",
+    "cloudfront": "Amazon CloudFront",
+    "akamaighost": "Akamai",
+    "sucuri/cloudproxy": "Sucuri",
+    "awselb": "AWS Elastic Load Balancer",
+    "awss3": "Amazon S3",
+}
+
+
+def detect_cdn_waf_from_org(*texts: str) -> list[str]:
+    """Matches org/ISP/ASN name text against a list of known CDN/WAF
+    provider keywords."""
+    combined = " ".join(t for t in texts if t).lower()
+    found = []
+    for keyword, provider in KNOWN_CDN_WAF_PROVIDERS.items():
+        if keyword in combined and provider not in found:
+            found.append(provider)
+    return found
+
+
+def enrich_ip(ip: str) -> dict | None:
+    """Queries ip-api.com (free, no API key required) for ASN, organization,
+    ISP, and geolocation data about an IP, and flags likely CDN/WAF providers
+    based on the organization name."""
+    print(f"\n[*] Running IP enrichment (ASN/org/geolocation) for {ip} ...")
+    if requests is None:
+        print("    [!] 'requests' library not installed. Run: pip install requests")
+        return None
+
+    fields = ("status,message,continent,country,countryCode,region,regionName,"
+              "city,district,zip,lat,lon,timezone,isp,org,as,asname,reverse,"
+              "mobile,proxy,hosting,query")
+    url = f"http://ip-api.com/json/{ip}?fields={fields}"
+    try:
+        resp = requests.get(url, timeout=10)
+        data = resp.json()
+        if data.get("status") != "success":
+            print(f"    [!] IP enrichment failed: {data.get('message', 'unknown error')}")
+            return None
+        print_ip_enrichment(data)
+        return data
+    except (requests.RequestException, ValueError) as e:
+        print(f"    [!] Failed to query IP enrichment: {e}")
+        return None
+
+
+def print_ip_enrichment(data: dict):
+    """Displays IP enrichment data (ASN, org, geolocation, hosting type)
+    in a readable format."""
+    print("-" * 60)
+    print(f"IP: {data.get('query', '-')}")
+    asn = data.get("as", "-")
+    asname = data.get("asname")
+    print(f"ASN: {asn}" + (f" ({asname})" if asname else ""))
+    print(f"Organization: {data.get('org', '-') or '-'}")
+    print(f"ISP: {data.get('isp', '-')}")
+
+    location_parts = [p for p in [data.get("city"), data.get("regionName"), data.get("country")] if p]
+    print(f"Location: {', '.join(location_parts) if location_parts else '-'}")
+    if data.get("zip"):
+        print(f"ZIP/Postal Code: {data.get('zip')}")
+    if data.get("lat") is not None and data.get("lon") is not None:
+        print(f"Coordinates: {data.get('lat')}, {data.get('lon')}")
+    print(f"Timezone: {data.get('timezone', '-')}")
+
+    print(f"Hosting/Datacenter IP: {'Yes' if data.get('hosting') else 'No'}")
+    print(f"Mobile Network: {'Yes' if data.get('mobile') else 'No'}")
+    print(f"Known Proxy/VPN: {'Yes' if data.get('proxy') else 'No'}")
+
+    cdn_waf = detect_cdn_waf_from_org(data.get("org", ""), data.get("asname", ""), data.get("isp", ""))
+    if cdn_waf:
+        print(f"CDN/WAF (by organization): {', '.join(cdn_waf)}")
+    print("-" * 60)
+
+
+def detect_cdn_waf_from_headers(hostname: str) -> list[str]:
+    """Sends an HTTP(S) request to the given hostname and inspects the
+    response headers for known CDN/WAF fingerprints (Cloudflare, Akamai,
+    CloudFront, Incapsula, Sucuri, Fastly, Azure Front Door, etc.)."""
+    if requests is None:
+        return []
+
+    print(f"\n[*] Checking HTTP headers of {hostname} for CDN/WAF fingerprints ...")
+    found = []
+    for scheme in ("https", "http"):
+        try:
+            resp = requests.get(f"{scheme}://{hostname}", timeout=6, allow_redirects=True)
+            headers_lower = {k.lower(): v for k, v in resp.headers.items()}
+
+            for header_name, provider in CDN_WAF_HEADER_SIGNATURES.items():
+                if header_name in headers_lower and provider not in found:
+                    found.append(provider)
+
+            server = headers_lower.get("server", "").lower()
+            for signature, provider in CDN_WAF_SERVER_SIGNATURES.items():
+                if signature in server and provider not in found:
+                    found.append(provider)
+
+            if found:
+                print(f"    -> CDN/WAF fingerprint(s) found via {scheme.upper()}: {', '.join(found)}")
+            else:
+                print(f"    -> No known CDN/WAF fingerprints found in {scheme.upper()} headers.")
+            break  # one successful request is enough
+        except requests.RequestException as e:
+            print(f"    [!] Could not connect via {scheme.upper()}: {e}")
+            continue
+
+    return found
+
+
+# ----------------------------------------------------------------------
 # WHOIS
 # ----------------------------------------------------------------------
 
@@ -590,7 +750,10 @@ def main():
         if is_ip(target):
             print(f"\n[+] Input identified as an IP: {target}")
             online = check_availability(target)
+            enrich_ip(target)
             resolved_domain = reverse_nslookup(target)  # PTR, if it exists
+            if resolved_domain:
+                detect_cdn_waf_from_headers(resolved_domain)
             whois_target = target
         else:
             print(f"\n[+] Input identified as a web address (domain): {target}")
@@ -598,8 +761,10 @@ def main():
             if ips:
                 for ip in ips:
                     check_availability(ip)
+                    enrich_ip(ip)
             else:
                 print("    [!] Could not resolve any IPs; skipping availability check.")
+            detect_cdn_waf_from_headers(target)
             whois_target = target  # domain whois tends to be more informative than IP whois
             resolved_domain = target
 

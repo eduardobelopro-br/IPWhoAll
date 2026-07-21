@@ -21,6 +21,8 @@ Reconnaissance and scanning of systems without authorization may constitute a cr
   - Domain → `nslookup` (resolves IPs) → availability check → WHOIS/RDAP → CNPJ.
   - IP → availability check → reverse `nslookup` (PTR) → WHOIS/RDAP → CNPJ.
 - **Availability check with ICMP-block evasion**: if `ping` gets no response (common in cloud/corporate environments that block ICMP), automatically falls back to testing a TCP connection on common ports (443, 80, 22, 3389, 21, 25, 8080).
+- **IP enrichment**: for every resolved IP, queries [ip-api.com](https://ip-api.com) (free, no API key) for ASN, organization/ISP, geolocation (city/region/country, coordinates, timezone), and hosting/mobile/proxy flags.
+- **CDN/WAF detection**: flags likely CDN/WAF providers (Cloudflare, Akamai, Fastly, Amazon CloudFront, Imperva Incapsula, Sucuri, Azure Front Door, and others) two ways — by matching the IP's organization/ASN name, and by sending an HTTP(S) request to the domain/hostname and inspecting response headers (`cf-ray`, `x-amz-cf-id`, `Server`, etc.) for known fingerprints.
 - **Full, raw output**: shows the actual output of the system's `ping` and `nslookup`, not a summarized version.
 - **WHOIS**: queried via `python-whois`, displaying the full response from the server.
 - **Official Registro.br RDAP**: for `.br` domains, queries the structured API (`rdap.registro.br`), far more reliable than traditional WHOIS for extracting the domain holder's CNPJ.
@@ -133,6 +135,8 @@ IPWhoAll/
 |------------------------|-----------------------------------------------------------------|
 | DNS resolution         | System `nslookup` command (fallback: Python `socket`)          |
 | Availability            | System ICMP `ping` + TCP connect fallback                      |
+| IP enrichment (ASN/org/geo) | [ip-api.com](https://ip-api.com) (free, no API key)         |
+| CDN/WAF detection       | Organization/ASN name matching + HTTP response header fingerprints |
 | WHOIS                    | `python-whois` library                                          |
 | RDAP (.br domains)      | [rdap.registro.br](https://rdap.registro.br) (official Registro.br/NIC.br API) |
 | CNPJ data                | [BrasilAPI](https://brasilapi.com.br) (public Receita Federal data) |
@@ -141,7 +145,7 @@ IPWhoAll/
 
 ## Roadmap / Possible Future Improvements
 
-- [ ] IP enrichment (ASN, organization, geolocation, CDN/WAF detection).
+- [x] IP enrichment (ASN, organization, geolocation, CDN/WAF detection).
 - [ ] Export the report in JSON/CSV format as well.
 - [ ] Parallelize availability checks when a domain resolves to multiple IPs.
 - [ ] Non-interactive mode (command-line arguments) for use in pipelines.
