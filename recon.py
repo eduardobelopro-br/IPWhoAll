@@ -5,14 +5,20 @@ Initial reconnaissance automation for pentesting (authorized use only).
 
 Flow:
   - Prompts for an IP address or web address (domain/URL).
-  - If domain: nslookup (resolves IPs) -> ping/availability check -> whois -> (if BR) CNPJ lookup.
-  - If IP: ping/availability check -> reverse nslookup -> whois -> (if BR) CNPJ lookup.
-  - At the end, offers to save the full report to IPWhoAll/<target>_<timestamp>.txt
+  - If domain: nslookup (resolves IPs) -> parallel availability checks -> IP
+    enrichment -> CDN/WAF detection -> whois -> (if BR) CNPJ lookup.
+  - If IP: availability check -> IP enrichment -> reverse nslookup ->
+    CDN/WAF detection -> whois -> (if BR) CNPJ lookup.
+  - At the end, offers to save the full report as .txt (raw session log),
+    .json (structured data), and/or .csv (tabular per-IP summary), under
+    IPWhoAll/<name>.<ext>.
 
 IMPORTANT: use only against targets for which you have explicit
 testing authorization (signed pentest contract, agreed scope, etc.).
 """
 
+import concurrent.futures
+import csv
 import io
 import ipaddress
 import json
@@ -156,10 +162,17 @@ def reverse_nslookup(ip: str) -> str | None:
 
 # ----------------------------------------------------------------------
 # AVAILABILITY (ping with TCP fallback to evade firewall/ICMP blocking)
+#
+# These functions deliberately avoid calling print() directly and instead
+# return their findings as data (or as pre-formatted log lines). That's
+# what makes it safe to run them concurrently for multiple IPs: each
+# thread builds its own isolated block of output, which the main thread
+# prints afterward, in order, so the report never gets garbled by
+# interleaved output from different threads.
 # ----------------------------------------------------------------------
 
-def icmp_ping(ip: str, attempts: int = 2, timeout_s: int = 2) -> bool:
-    """Native OS ICMP ping (Windows/Linux), showing the full output."""
+def icmp_ping(ip: str, attempts: int = 2, timeout_s: int = 2) -> tuple[bool, str]:
+    """Native OS ICMP ping (Windows/Linux). Returns (success, raw_output)."""
     flag_count = "-n" if sys.platform.startswith("win") else "-c"
     flag_timeout = "-w" if sys.platform.startswith("win") else "-W"
     timeout_val = str(timeout_s * 1000) if sys.platform.startswith("win") else str(timeout_s)
@@ -168,51 +181,87 @@ def icmp_ping(ip: str, attempts: int = 2, timeout_s: int = 2) -> bool:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         output = (result.stdout or "") + (result.stderr or "")
-        if output.strip():
-            _print_raw_output(output)
-        return result.returncode == 0
+        return result.returncode == 0, output
     except FileNotFoundError:
-        print("    [!] 'ping' command not found on this system.")
-        return False
+        return False, "[!] 'ping' command not found on this system."
     except subprocess.TimeoutExpired:
-        print("    [!] Timeout exceeded while running ping.")
-        return False
+        return False, "[!] Timeout exceeded while running ping."
 
 
-def check_tcp(ip: str, ports: list[int] = None, timeout_s: float = 2.0) -> int | None:
+def check_tcp(ip: str, ports: list[int] = None, timeout_s: float = 2.0) -> tuple[int | None, list[str]]:
     """Fallback: attempts to connect via TCP on common ports (evades ICMP
-    blocking). Shows the result of each port attempt."""
+    blocking). Returns (open_port_or_None, log_lines) for each port tried."""
     if ports is None:
         ports = [443, 80, 22, 3389, 21, 25, 8080]
+    lines = []
     for port in ports:
         try:
             with socket.create_connection((ip, port), timeout=timeout_s):
-                print(f"    -> TCP port {port}: OPEN (host responds)")
-                return port
+                lines.append(f"    -> TCP port {port}: OPEN (host responds)")
+                return port, lines
         except socket.timeout:
-            print(f"    -> TCP port {port}: no response (timeout)")
+            lines.append(f"    -> TCP port {port}: no response (timeout)")
         except ConnectionRefusedError:
-            print(f"    -> TCP port {port}: closed (connection refused)")
+            lines.append(f"    -> TCP port {port}: closed (connection refused)")
         except OSError as e:
-            print(f"    -> TCP port {port}: error ({e})")
-    return None
+            lines.append(f"    -> TCP port {port}: error ({e})")
+    return None, lines
 
 
-def check_availability(ip: str) -> bool:
-    print(f"\n[*] Checking availability of {ip} ...")
-    if icmp_ping(ip):
-        print("    -> Host responded to ICMP ping (online).")
-        return True
+def check_availability(ip: str) -> tuple[bool, str | None, list[str]]:
+    """Checks whether a host is online: tries ICMP ping first, then falls
+    back to a TCP connect scan on common ports if ICMP gets no response.
+    Returns (available, method, log_lines) — method is "icmp", "tcp:<port>",
+    or None. Safe to call from multiple threads at once."""
+    log = [f"\n[*] Checking availability of {ip} ..."]
 
-    print("    [!] No ICMP response (possible firewall blocking).")
-    print("    [*] Trying TCP connect fallback on common ports...")
-    open_port = check_tcp(ip)
+    success, ping_output = icmp_ping(ip)
+    if ping_output.strip():
+        log.append("-" * 60)
+        log.append(ping_output.strip())
+        log.append("-" * 60)
+
+    if success:
+        log.append("    -> Host responded to ICMP ping (online).")
+        return True, "icmp", log
+
+    log.append("    [!] No ICMP response (possible firewall blocking).")
+    log.append("    [*] Trying TCP connect fallback on common ports...")
+    open_port, tcp_lines = check_tcp(ip)
+    log.extend(tcp_lines)
+
     if open_port:
-        print(f"    -> Host responded on TCP port {open_port} (online, ICMP blocked).")
-        return True
+        log.append(f"    -> Host responded on TCP port {open_port} (online, ICMP blocked).")
+        return True, f"tcp:{open_port}", log
 
-    print("    [!] No response via ICMP or TCP on the tested ports.")
-    return False
+    log.append("    [!] No response via ICMP or TCP on the tested ports.")
+    return False, None, log
+
+
+def check_availability_parallel(ips: list[str], max_workers: int = 8) -> dict[str, tuple[bool, str | None, list[str]]]:
+    """Runs check_availability() for multiple IPs concurrently using a
+    thread pool (availability checks are I/O-bound: waiting on ping/TCP
+    timeouts, not CPU), which is much faster than checking IPs one by one
+    when a domain resolves to several addresses. Returns a dict keyed by
+    IP; the caller is responsible for printing the log_lines in a
+    consistent order once every check has finished."""
+    results = {}
+    if not ips:
+        return results
+
+    workers = max(1, min(max_workers, len(ips)))
+    print(f"\n[*] Checking availability of {len(ips)} IP(s) in parallel ({workers} workers) ...")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_ip = {executor.submit(check_availability, ip): ip for ip in ips}
+        for future in concurrent.futures.as_completed(future_to_ip):
+            ip = future_to_ip[future]
+            try:
+                results[ip] = future.result()
+            except Exception as e:
+                results[ip] = (False, None, [f"\n[*] Checking availability of {ip} ...",
+                                              f"    [!] Unexpected error during check: {e}"])
+    return results
 
 
 # ----------------------------------------------------------------------
@@ -407,6 +456,13 @@ def run_whois(target: str):
         return None
 
 
+def get_whois_raw_text(whois_data) -> str | None:
+    """Returns the raw WHOIS response text, if available, for use in exports."""
+    if whois_data is None:
+        return None
+    return getattr(whois_data, "text", None) or str(whois_data)
+
+
 def looks_like_brazilian_company(target: str, whois_data) -> bool:
     if target.endswith(".br"):
         return True
@@ -498,16 +554,38 @@ def print_formatted_rdap(data: dict):
     print("-" * 60)
 
 
-def rdap_registro_br(domain: str) -> str | None:
+def _find_cnpj_in_entity(entity: dict) -> str | None:
+    """Looks for a CNPJ (14-digit taxpayer ID) inside a single RDAP entity.
+
+    Registro.br exposes the registrant's CNPJ/CPF in two possible places
+    depending on the domain: the 'publicIds' array (type == 'cnpj'), or
+    directly as the entity's 'handle' (a bare 14-digit string for CNPJ,
+    or 11 digits for an individual's CPF). Both are checked here."""
+    for pid in entity.get("publicIds", []):
+        if pid.get("type", "").lower() == "cnpj":
+            digits = re.sub(r"\D", "", pid.get("identifier", ""))
+            if len(digits) == 14:
+                return format_cnpj(digits)
+
+    handle_digits = re.sub(r"\D", "", entity.get("handle", "") or "")
+    if len(handle_digits) == 14:
+        return format_cnpj(handle_digits)
+
+    return None
+
+
+def rdap_registro_br(domain: str) -> tuple[str | None, dict | None]:
     """
     Queries the official Registro.br RDAP service (a modern, structured
-    replacement for WHOIS on .br domains). Returns JSON data, including the
-    CNPJ/CPF of the domain holder in the 'publicIds' field — far more
-    reliable than extracting it via regex from free-form text.
+    replacement for WHOIS on .br domains). Returns a tuple of
+    (cnpj_or_None, raw_rdap_json_or_None). The CNPJ/CPF of the domain
+    holder can come either from the 'publicIds' field or from the
+    registrant entity's 'handle' — far more reliable than extracting it
+    via regex from free-form text.
     Docs: https://rdap.registro.br
     """
     if requests is None or not domain.endswith(".br"):
-        return None
+        return None, None
 
     url = f"https://rdap.registro.br/domain/{domain}"
     print(f"\n[*] Querying the official Registro.br RDAP for {domain} ...")
@@ -515,22 +593,41 @@ def rdap_registro_br(domain: str) -> str | None:
         resp = requests.get(url, timeout=10)
         if resp.status_code != 200:
             print(f"    [!] RDAP did not return data (status {resp.status_code}).")
-            return None
+            return None, None
         data = resp.json()
 
         print_formatted_rdap(data)
 
-        for entity in data.get("entities", []):
-            for pid in entity.get("publicIds", []):
-                if pid.get("type", "").lower() == "cnpj":
-                    digits = re.sub(r"\D", "", pid.get("identifier", ""))
-                    if len(digits) == 14:
-                        return format_cnpj(digits)
-        print("    [!] No CNPJ was found among the entities returned by RDAP.")
-        return None
+        entities = data.get("entities", [])
+        cnpj_found = None
+
+        # First pass: prioritize the entity with the "registrant" role.
+        for entity in entities:
+            if "registrant" in [r.lower() for r in entity.get("roles", [])]:
+                cnpj_found = _find_cnpj_in_entity(entity)
+                if cnpj_found:
+                    break
+
+        # Second pass: fall back to any entity (including nested sub-entities).
+        if not cnpj_found:
+            for entity in entities:
+                cnpj_found = _find_cnpj_in_entity(entity)
+                if cnpj_found:
+                    break
+                for sub_entity in entity.get("entities", []):
+                    cnpj_found = _find_cnpj_in_entity(sub_entity)
+                    if cnpj_found:
+                        break
+                if cnpj_found:
+                    break
+
+        if not cnpj_found:
+            print("    [!] No CNPJ was found among the entities returned by RDAP.")
+
+        return cnpj_found, data
     except (requests.RequestException, ValueError) as e:
         print(f"    [!] Failed to query RDAP: {e}")
-        return None
+        return None, None
 
 
 def extract_cnpj(whois_data) -> str | None:
@@ -617,11 +714,13 @@ def print_formatted_cnpj(data: dict):
     print("-" * 60)
 
 
-def lookup_cnpj(cnpj: str):
+def lookup_cnpj(cnpj: str) -> dict | None:
+    """Looks up a CNPJ on BrasilAPI and returns the parsed JSON data
+    (or None on failure), so it can also be included in JSON exports."""
     print(f"\n[*] Looking up CNPJ {cnpj} on BrasilAPI ...")
     if requests is None:
         print("    [!] 'requests' library not installed. Run: pip install requests")
-        return
+        return None
     clean_cnpj = re.sub(r"\D", "", cnpj)
     url = f"https://brasilapi.com.br/api/cnpj/v1/{clean_cnpj}"
     try:
@@ -629,14 +728,17 @@ def lookup_cnpj(cnpj: str):
         if resp.status_code == 200:
             data = resp.json()
             print_formatted_cnpj(data)
+            return data
         else:
             print(f"    [!] CNPJ not found or invalid (status {resp.status_code}).")
+            return None
     except requests.RequestException as e:
         print(f"    [!] Error querying BrasilAPI: {e}")
+        return None
 
 
 # ----------------------------------------------------------------------
-# OUTPUT CAPTURE AND REPORT SAVING
+# OUTPUT CAPTURE AND REPORT EXPORT (TXT / JSON / CSV)
 # ----------------------------------------------------------------------
 
 class Tee:
@@ -674,31 +776,115 @@ def choose_base_directory() -> str:
     return documents if choice == "2" else current_dir
 
 
-def choose_file_name(target: str) -> str:
-    """Asks the user for the report file name.
+def choose_file_base_name(target: str) -> str:
+    """Asks the user for the report's base file name (without extension —
+    the correct extension is added automatically per exported format).
     If left blank, uses a default name based on the target + timestamp."""
     sanitized_target = re.sub(r'[<>:"/\\|?*]', "_", target)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     default_name = f"{sanitized_target}_{timestamp}"
 
     typed_name = input(
-        f"\nFile name (press Enter to use the default '{default_name}.txt'): "
+        f"\nFile name, without extension (press Enter to use the default '{default_name}'): "
     ).strip()
 
     if not typed_name:
-        final_name = default_name
-    else:
-        final_name = re.sub(r'[<>:"/\\|?*]', "_", typed_name)
+        return default_name
 
-    if not final_name.lower().endswith(".txt"):
-        final_name += ".txt"
+    base_name = re.sub(r'[<>:"/\\|?*]', "_", typed_name)
+    # Strip a known extension if the user typed one anyway.
+    for ext in (".txt", ".json", ".csv"):
+        if base_name.lower().endswith(ext):
+            base_name = base_name[: -len(ext)]
+            break
+    return base_name
 
-    return final_name
+
+def choose_export_formats() -> list[str]:
+    """Asks which format(s) the report should be saved in."""
+    print("\nWhich format(s) would you like to save the report in?")
+    print("  1) Text (.txt)  - full raw session log, exactly as shown on screen")
+    print("  2) JSON (.json) - structured data (all findings, machine-readable)")
+    print("  3) CSV (.csv)   - tabular summary, one row per resolved IP")
+    print("  4) All of the above")
+
+    choice = input("Choose one or more, comma-separated (e.g. 1,3) [default: 1]: ").strip()
+    if not choice:
+        return ["txt"]
+    if choice == "4":
+        return ["txt", "json", "csv"]
+
+    mapping = {"1": "txt", "2": "json", "3": "csv"}
+    selected = []
+    for part in choice.split(","):
+        fmt = mapping.get(part.strip())
+        if fmt and fmt not in selected:
+            selected.append(fmt)
+    return selected or ["txt"]
+
+
+def build_json_content(session: dict) -> str:
+    """Serializes the structured session data collected during the run
+    into an indented, human- and machine-readable JSON document."""
+    return json.dumps(session, indent=2, ensure_ascii=False, default=str)
+
+
+def build_csv_content(session: dict) -> str:
+    """Builds a tabular CSV summary of the session: one row per resolved
+    IP, combining its availability/enrichment data with the target-level
+    findings (WHOIS-derived Brazilian-company flag, CNPJ, etc.)."""
+    fieldnames = [
+        "target", "input_type", "ip", "available", "availability_method",
+        "asn", "organization", "isp", "city", "region", "country", "zip",
+        "latitude", "longitude", "timezone", "hosting", "mobile", "proxy",
+        "cdn_waf_by_org", "reverse_dns", "cdn_waf_by_headers",
+        "is_brazilian_company", "cnpj",
+    ]
+
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames)
+    writer.writeheader()
+
+    resolved_ips = session.get("resolved_ips") or [{}]
+    for entry in resolved_ips:
+        enrichment = entry.get("enrichment") or {}
+        cdn_by_org = detect_cdn_waf_from_org(
+            enrichment.get("org", ""), enrichment.get("asname", ""), enrichment.get("isp", "")
+        ) if enrichment else []
+
+        writer.writerow({
+            "target": session.get("target"),
+            "input_type": session.get("input_type"),
+            "ip": entry.get("ip"),
+            "available": entry.get("available"),
+            "availability_method": entry.get("availability_method"),
+            "asn": enrichment.get("as"),
+            "organization": enrichment.get("org"),
+            "isp": enrichment.get("isp"),
+            "city": enrichment.get("city"),
+            "region": enrichment.get("regionName"),
+            "country": enrichment.get("country"),
+            "zip": enrichment.get("zip"),
+            "latitude": enrichment.get("lat"),
+            "longitude": enrichment.get("lon"),
+            "timezone": enrichment.get("timezone"),
+            "hosting": enrichment.get("hosting"),
+            "mobile": enrichment.get("mobile"),
+            "proxy": enrichment.get("proxy"),
+            "cdn_waf_by_org": ", ".join(cdn_by_org),
+            "reverse_dns": session.get("reverse_dns"),
+            "cdn_waf_by_headers": ", ".join(session.get("cdn_waf_headers") or []),
+            "is_brazilian_company": session.get("is_brazilian_company"),
+            "cnpj": session.get("cnpj"),
+        })
+
+    return buffer.getvalue()
 
 
 def save_report(content: str, file_name: str, base_directory: str = None) -> str:
     """Creates (if needed) the IPWhoAll folder inside the chosen base
-    directory and saves the recon report under the given file name."""
+    directory and saves the given content under the given file name.
+    Works for any text-based format (.txt, .json, .csv)."""
     if base_directory is None:
         base_directory = os.getcwd()
 
@@ -711,7 +897,7 @@ def save_report(content: str, file_name: str, base_directory: str = None) -> str
 
     path = os.path.join(folder, file_name)
 
-    with open(path, "w", encoding="utf-8") as f:
+    with open(path, "w", encoding="utf-8", newline="") as f:
         f.write(content)
 
     absolute_path = os.path.abspath(path)
@@ -747,36 +933,85 @@ def main():
         whois_data = None
         resolved_domain = None  # used for RDAP lookup (registro.br)
 
+        # Structured data collected throughout the run, used for the
+        # JSON/CSV exports at the end.
+        session = {
+            "target": target,
+            "input_type": None,
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "resolved_ips": [],
+            "reverse_dns": None,
+            "cdn_waf_headers": [],
+            "whois_raw_text": None,
+            "is_brazilian_company": False,
+            "rdap": None,
+            "cnpj": None,
+            "cnpj_data": None,
+        }
+
         if is_ip(target):
             print(f"\n[+] Input identified as an IP: {target}")
-            online = check_availability(target)
-            enrich_ip(target)
+            session["input_type"] = "ip"
+
+            available, method, log_lines = check_availability(target)
+            for line in log_lines:
+                print(line)
+
+            enrichment = enrich_ip(target)
+            session["resolved_ips"].append({
+                "ip": target, "available": available,
+                "availability_method": method, "enrichment": enrichment,
+            })
+
             resolved_domain = reverse_nslookup(target)  # PTR, if it exists
+            session["reverse_dns"] = resolved_domain
             if resolved_domain:
-                detect_cdn_waf_from_headers(resolved_domain)
+                session["cdn_waf_headers"] = detect_cdn_waf_from_headers(resolved_domain)
             whois_target = target
         else:
             print(f"\n[+] Input identified as a web address (domain): {target}")
+            session["input_type"] = "domain"
+
             ips = nslookup_domain(target)
             if ips:
+                # Availability checks run in parallel (I/O-bound: ping/TCP
+                # timeouts), then results are printed sequentially in the
+                # original resolution order so the report stays readable.
+                availability_results = check_availability_parallel(ips)
                 for ip in ips:
-                    check_availability(ip)
-                    enrich_ip(ip)
+                    available, method, log_lines = availability_results.get(
+                        ip, (False, None, [f"\n[*] Checking availability of {ip} ...",
+                                            "    [!] No result returned for this IP."])
+                    )
+                    for line in log_lines:
+                        print(line)
+
+                    enrichment = enrich_ip(ip)
+                    session["resolved_ips"].append({
+                        "ip": ip, "available": available,
+                        "availability_method": method, "enrichment": enrichment,
+                    })
             else:
                 print("    [!] Could not resolve any IPs; skipping availability check.")
-            detect_cdn_waf_from_headers(target)
+
+            session["cdn_waf_headers"] = detect_cdn_waf_from_headers(target)
             whois_target = target  # domain whois tends to be more informative than IP whois
             resolved_domain = target
 
         # From here on, the flow is unified for IP and domain
         whois_data = run_whois(whois_target)
+        session["whois_raw_text"] = get_whois_raw_text(whois_data)
 
-        if looks_like_brazilian_company(whois_target, whois_data):
+        is_brazilian = looks_like_brazilian_company(whois_target, whois_data)
+        session["is_brazilian_company"] = is_brazilian
+
+        if is_brazilian:
             print("\n[+] Signs of a Brazilian company/domain (.br) detected.")
 
             extracted_cnpj = None
             if resolved_domain and resolved_domain.endswith(".br"):
-                extracted_cnpj = rdap_registro_br(resolved_domain)
+                extracted_cnpj, rdap_data = rdap_registro_br(resolved_domain)
+                session["rdap"] = rdap_data
 
             if not extracted_cnpj:
                 extracted_cnpj = extract_cnpj(whois_data)
@@ -784,12 +1019,14 @@ def main():
                     print(f"[+] CNPJ extracted from WHOIS text: {extracted_cnpj}")
 
             if extracted_cnpj:
-                lookup_cnpj(extracted_cnpj)
+                session["cnpj"] = extracted_cnpj
+                session["cnpj_data"] = lookup_cnpj(extracted_cnpj)
             else:
                 print("[i] Could not automatically extract a CNPJ (neither via RDAP nor WHOIS).")
                 answer = input("Enter the CNPJ manually (or press Enter to skip): ").strip()
                 if answer:
-                    lookup_cnpj(answer)
+                    session["cnpj"] = answer
+                    session["cnpj_data"] = lookup_cnpj(answer)
         else:
             print("\n[i] No clear signs of a Brazilian company found via whois/domain.")
 
@@ -800,8 +1037,15 @@ def main():
         ).strip().lower()
         if save_answer.startswith("y"):
             chosen_directory = choose_base_directory()
-            chosen_file_name = choose_file_name(target)
-            save_report(buffer.getvalue(), chosen_file_name, chosen_directory)
+            base_name = choose_file_base_name(target)
+            formats = choose_export_formats()
+
+            if "txt" in formats:
+                save_report(buffer.getvalue(), f"{base_name}.txt", chosen_directory)
+            if "json" in formats:
+                save_report(build_json_content(session), f"{base_name}.json", chosen_directory)
+            if "csv" in formats:
+                save_report(build_csv_content(session), f"{base_name}.csv", chosen_directory)
         else:
             print("[i] Report not saved.")
 
