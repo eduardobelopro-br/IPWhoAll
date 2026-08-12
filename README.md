@@ -30,6 +30,7 @@ Reconnaissance and scanning of systems without authorization may constitute a cr
 - **Automatic CNPJ extraction**: tries RDAP first; if not found, falls back to regex on the WHOIS text; only asks for manual input as a last resort.
 - **CNPJ lookup via BrasilAPI**: returns legal name, registration status, CNAE, partners/officers (QSA), address, tax regime, etc., in a readable format.
 - **Report generation (TXT / JSON / CSV)**: at the end, asks whether to save the findings, letting you choose the directory (current folder or `~/Documents`), the file name, and one or more export formats — a `.txt` file with the full raw session log, a `.json` file with all structured findings (ideal for feeding into other tools), and/or a `.csv` file with one row per resolved IP (availability, ASN, org, geolocation, CDN/WAF, CNPJ) — all organized under the `IPWhoAll/` folder.
+- **Non-interactive / batch mode**: pass one or more targets (and/or `--targets-file`) as command-line arguments to skip every prompt — runs recon against each target in sequence and auto-saves the report(s), ideal for pipelines and scripted multi-target runs. See [Non-Interactive / Batch Mode](#non-interactive--batch-mode) below.
 
 ---
 
@@ -117,6 +118,40 @@ Choose one or more, comma-separated (e.g. 1,3) [default: 1]:
 - Type a custom name, or press Enter to use the suggested default name.
 - Choose one format, several (comma-separated), or `4` for all three.
 
+### Non-Interactive / Batch Mode
+
+Passing one or more targets (or a `--targets-file`) on the command line skips every prompt and runs recon against each target in sequence, saving each one's report automatically:
+
+```bash
+# One target
+python3 recon.py example.com
+
+# Multiple targets in one run
+python3 recon.py example.com 192.0.2.10 another-domain.com.br
+
+# From a file (one target per line, '#' comments allowed)
+python3 recon.py -f targets.txt
+```
+
+Options:
+
+| Flag | Description |
+|------|--------------|
+| `-f, --targets-file PATH` | Text file with one target per line (`#` comments allowed). Combines with any targets also given as arguments. |
+| `-o, --output-dir DIR` | Directory under which the `IPWhoAll/` report folder is created (default: current directory). |
+| `--formats LIST` | Comma-separated export formats: `txt`, `json`, `csv`, `all`, or `none` to skip saving entirely. Default: `txt`. |
+| `--name NAME` | Base file name (without extension) for the report. Only valid with a single target — ignored (auto-generated `<target>_<timestamp>` used instead) for multiple targets. |
+
+```bash
+# Export JSON + CSV for every target in the file, into ./reports
+python3 recon.py -f targets.txt --formats json,csv -o ./reports
+
+# Just print findings to stdout, don't save anything
+python3 recon.py example.com --formats none
+```
+
+Running `python3 recon.py` with **no** target and no `--targets-file` falls back to the original interactive mode described above. Run `python3 recon.py --help` for the full flag reference.
+
 The report is saved to:
 
 ```
@@ -162,7 +197,7 @@ IPWhoAll/
 - [x] IP enrichment (ASN, organization, geolocation, CDN/WAF detection).
 - [x] Export the report in JSON/CSV format as well.
 - [x] Parallelize availability checks when a domain resolves to multiple IPs.
-- [ ] Non-interactive mode (command-line arguments) for use in pipelines.
+- [x] Non-interactive mode (command-line arguments) for use in pipelines.
 
 ---
 

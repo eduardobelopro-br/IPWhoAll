@@ -36,4 +36,4 @@ fi
 echo "[*] Venv activated ($VENV_DIR)."
 echo ""
 
-python3 "$RECON_SCRIPT"
+python3 "$RECON_SCRIPT" "$@"

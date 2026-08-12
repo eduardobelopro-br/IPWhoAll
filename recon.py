@@ -15,8 +15,15 @@ Flow:
 
 IMPORTANT: use only against targets for which you have explicit
 testing authorization (signed pentest contract, agreed scope, etc.).
+
+Usage:
+  - No arguments: interactive mode (prompts for the target and for where/
+    how to save the report), same as before.
+  - One or more targets, and/or --targets-file: non-interactive/batch
+    mode, suitable for pipelines. Run `recon.py --help` for all options.
 """
 
+import argparse
 import concurrent.futures
 import csv
 import io
@@ -61,12 +68,34 @@ def warn_missing_dependencies():
 # ----------------------------------------------------------------------
 
 def normalize_input(value: str) -> str:
-    """Strips protocol, path, and port if the user pastes a full URL."""
+    """Strips protocol, path, and port if the user pastes a full URL.
+
+    IPv6 addresses use ':' natively, so a naive split(":")[0] would mangle
+    them (e.g. "2001:db8::1" -> "2001"). Bracketed IPv6 in a URL netloc
+    (e.g. "[2001:db8::1]:8080") and bare IPv6 (no brackets, no port) are
+    both handled before any port-stripping is attempted.
+    """
     value = value.strip()
     if "://" in value:
         value = urlparse(value).netloc or value
-    # remove residual path/port (e.g. domain.com/something or domain.com:8080)
-    value = value.split("/")[0].split(":")[0]
+
+    if value.startswith("["):
+        closing = value.find("]")
+        if closing != -1:
+            return value[1:closing]
+
+    try:
+        ipaddress.ip_address(value)
+        return value  # bare IPv4/IPv6 literal, nothing left to strip
+    except ValueError:
+        pass
+
+    # remove residual path (e.g. domain.com/something)
+    value = value.split("/")[0]
+    # strip a port only when there's exactly one ':' (avoids mangling
+    # unbracketed IPv6, which would have multiple ':')
+    if value.count(":") == 1:
+        value = value.split(":")[0]
     return value
 
 
@@ -776,13 +805,19 @@ def choose_base_directory() -> str:
     return documents if choice == "2" else current_dir
 
 
+def default_base_name(target: str) -> str:
+    """Builds the '<target>_<timestamp>' default base file name, shared by
+    the interactive prompt and by non-interactive/batch mode."""
+    sanitized_target = re.sub(r'[<>:"/\\|?*]', "_", target)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{sanitized_target}_{timestamp}"
+
+
 def choose_file_base_name(target: str) -> str:
     """Asks the user for the report's base file name (without extension —
     the correct extension is added automatically per exported format).
     If left blank, uses a default name based on the target + timestamp."""
-    sanitized_target = re.sub(r'[<>:"/\\|?*]', "_", target)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    default_name = f"{sanitized_target}_{timestamp}"
+    default_name = default_base_name(target)
 
     typed_name = input(
         f"\nFile name, without extension (press Enter to use the default '{default_name}'): "
@@ -909,7 +944,126 @@ def save_report(content: str, file_name: str, base_directory: str = None) -> str
 # MAIN FLOW
 # ----------------------------------------------------------------------
 
-def main():
+def perform_recon(raw_target: str, allow_prompts: bool = True) -> dict:
+    """Runs the full recon flow for a single target (normalize -> resolve/
+    availability -> IP enrichment -> CDN/WAF detection -> whois -> CNPJ)
+    and returns the structured session dict used for JSON/CSV exports.
+
+    Assumes the caller has already set up stdout the way it wants (e.g.
+    wrapped in a Tee to also capture the session log for a .txt export).
+
+    allow_prompts controls whether the last-resort "enter the CNPJ
+    manually" prompt is used when neither RDAP nor WHOIS finds one.
+    Non-interactive/batch mode runs with allow_prompts=False, since
+    there's no one there to answer it.
+    """
+    target = normalize_input(raw_target)
+    resolved_domain = None  # used for RDAP lookup (registro.br)
+
+    # Structured data collected throughout the run, used for the
+    # JSON/CSV exports at the end.
+    session = {
+        "target": target,
+        "input_type": None,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "resolved_ips": [],
+        "reverse_dns": None,
+        "cdn_waf_headers": [],
+        "whois_raw_text": None,
+        "is_brazilian_company": False,
+        "rdap": None,
+        "cnpj": None,
+        "cnpj_data": None,
+    }
+
+    if is_ip(target):
+        print(f"\n[+] Input identified as an IP: {target}")
+        session["input_type"] = "ip"
+
+        available, method, log_lines = check_availability(target)
+        for line in log_lines:
+            print(line)
+
+        enrichment = enrich_ip(target)
+        session["resolved_ips"].append({
+            "ip": target, "available": available,
+            "availability_method": method, "enrichment": enrichment,
+        })
+
+        resolved_domain = reverse_nslookup(target)  # PTR, if it exists
+        session["reverse_dns"] = resolved_domain
+        if resolved_domain:
+            session["cdn_waf_headers"] = detect_cdn_waf_from_headers(resolved_domain)
+        whois_target = target
+    else:
+        print(f"\n[+] Input identified as a web address (domain): {target}")
+        session["input_type"] = "domain"
+
+        ips = nslookup_domain(target)
+        if ips:
+            # Availability checks run in parallel (I/O-bound: ping/TCP
+            # timeouts), then results are printed sequentially in the
+            # original resolution order so the report stays readable.
+            availability_results = check_availability_parallel(ips)
+            for ip in ips:
+                available, method, log_lines = availability_results.get(
+                    ip, (False, None, [f"\n[*] Checking availability of {ip} ...",
+                                        "    [!] No result returned for this IP."])
+                )
+                for line in log_lines:
+                    print(line)
+
+                enrichment = enrich_ip(ip)
+                session["resolved_ips"].append({
+                    "ip": ip, "available": available,
+                    "availability_method": method, "enrichment": enrichment,
+                })
+        else:
+            print("    [!] Could not resolve any IPs; skipping availability check.")
+
+        session["cdn_waf_headers"] = detect_cdn_waf_from_headers(target)
+        whois_target = target  # domain whois tends to be more informative than IP whois
+        resolved_domain = target
+
+    # From here on, the flow is unified for IP and domain
+    whois_data = run_whois(whois_target)
+    session["whois_raw_text"] = get_whois_raw_text(whois_data)
+
+    is_brazilian = looks_like_brazilian_company(whois_target, whois_data)
+    session["is_brazilian_company"] = is_brazilian
+
+    if is_brazilian:
+        print("\n[+] Signs of a Brazilian company/domain (.br) detected.")
+
+        extracted_cnpj = None
+        if resolved_domain and resolved_domain.endswith(".br"):
+            extracted_cnpj, rdap_data = rdap_registro_br(resolved_domain)
+            session["rdap"] = rdap_data
+
+        if not extracted_cnpj:
+            extracted_cnpj = extract_cnpj(whois_data)
+            if extracted_cnpj:
+                print(f"[+] CNPJ extracted from WHOIS text: {extracted_cnpj}")
+
+        if extracted_cnpj:
+            session["cnpj"] = extracted_cnpj
+            session["cnpj_data"] = lookup_cnpj(extracted_cnpj)
+        else:
+            print("[i] Could not automatically extract a CNPJ (neither via RDAP nor WHOIS).")
+            if allow_prompts:
+                answer = input("Enter the CNPJ manually (or press Enter to skip): ").strip()
+                if answer:
+                    session["cnpj"] = answer
+                    session["cnpj_data"] = lookup_cnpj(answer)
+    else:
+        print("\n[i] No clear signs of a Brazilian company found via whois/domain.")
+
+    return session
+
+
+def run_interactive():
+    """Original single-target flow: prompts for the target, runs recon,
+    then interactively asks whether/where/how to save the report."""
     original_stdout = sys.stdout
     buffer = io.StringIO()
     sys.stdout = Tee(original_stdout, buffer)
@@ -929,107 +1083,7 @@ def main():
             print("Empty input. Exiting.")
             return
 
-        target = normalize_input(raw_input_value)
-        whois_data = None
-        resolved_domain = None  # used for RDAP lookup (registro.br)
-
-        # Structured data collected throughout the run, used for the
-        # JSON/CSV exports at the end.
-        session = {
-            "target": target,
-            "input_type": None,
-            "generated_at": datetime.now().isoformat(timespec="seconds"),
-            "resolved_ips": [],
-            "reverse_dns": None,
-            "cdn_waf_headers": [],
-            "whois_raw_text": None,
-            "is_brazilian_company": False,
-            "rdap": None,
-            "cnpj": None,
-            "cnpj_data": None,
-        }
-
-        if is_ip(target):
-            print(f"\n[+] Input identified as an IP: {target}")
-            session["input_type"] = "ip"
-
-            available, method, log_lines = check_availability(target)
-            for line in log_lines:
-                print(line)
-
-            enrichment = enrich_ip(target)
-            session["resolved_ips"].append({
-                "ip": target, "available": available,
-                "availability_method": method, "enrichment": enrichment,
-            })
-
-            resolved_domain = reverse_nslookup(target)  # PTR, if it exists
-            session["reverse_dns"] = resolved_domain
-            if resolved_domain:
-                session["cdn_waf_headers"] = detect_cdn_waf_from_headers(resolved_domain)
-            whois_target = target
-        else:
-            print(f"\n[+] Input identified as a web address (domain): {target}")
-            session["input_type"] = "domain"
-
-            ips = nslookup_domain(target)
-            if ips:
-                # Availability checks run in parallel (I/O-bound: ping/TCP
-                # timeouts), then results are printed sequentially in the
-                # original resolution order so the report stays readable.
-                availability_results = check_availability_parallel(ips)
-                for ip in ips:
-                    available, method, log_lines = availability_results.get(
-                        ip, (False, None, [f"\n[*] Checking availability of {ip} ...",
-                                            "    [!] No result returned for this IP."])
-                    )
-                    for line in log_lines:
-                        print(line)
-
-                    enrichment = enrich_ip(ip)
-                    session["resolved_ips"].append({
-                        "ip": ip, "available": available,
-                        "availability_method": method, "enrichment": enrichment,
-                    })
-            else:
-                print("    [!] Could not resolve any IPs; skipping availability check.")
-
-            session["cdn_waf_headers"] = detect_cdn_waf_from_headers(target)
-            whois_target = target  # domain whois tends to be more informative than IP whois
-            resolved_domain = target
-
-        # From here on, the flow is unified for IP and domain
-        whois_data = run_whois(whois_target)
-        session["whois_raw_text"] = get_whois_raw_text(whois_data)
-
-        is_brazilian = looks_like_brazilian_company(whois_target, whois_data)
-        session["is_brazilian_company"] = is_brazilian
-
-        if is_brazilian:
-            print("\n[+] Signs of a Brazilian company/domain (.br) detected.")
-
-            extracted_cnpj = None
-            if resolved_domain and resolved_domain.endswith(".br"):
-                extracted_cnpj, rdap_data = rdap_registro_br(resolved_domain)
-                session["rdap"] = rdap_data
-
-            if not extracted_cnpj:
-                extracted_cnpj = extract_cnpj(whois_data)
-                if extracted_cnpj:
-                    print(f"[+] CNPJ extracted from WHOIS text: {extracted_cnpj}")
-
-            if extracted_cnpj:
-                session["cnpj"] = extracted_cnpj
-                session["cnpj_data"] = lookup_cnpj(extracted_cnpj)
-            else:
-                print("[i] Could not automatically extract a CNPJ (neither via RDAP nor WHOIS).")
-                answer = input("Enter the CNPJ manually (or press Enter to skip): ").strip()
-                if answer:
-                    session["cnpj"] = answer
-                    session["cnpj_data"] = lookup_cnpj(answer)
-        else:
-            print("\n[i] No clear signs of a Brazilian company found via whois/domain.")
-
+        session = perform_recon(raw_input_value, allow_prompts=True)
         print("\n[\u2713] Reconnaissance complete.")
 
         save_answer = input(
@@ -1037,7 +1091,7 @@ def main():
         ).strip().lower()
         if save_answer.startswith("y"):
             chosen_directory = choose_base_directory()
-            base_name = choose_file_base_name(target)
+            base_name = choose_file_base_name(session["target"])
             formats = choose_export_formats()
 
             if "txt" in formats:
@@ -1051,6 +1105,140 @@ def main():
 
     finally:
         sys.stdout = original_stdout
+
+
+def run_batch(targets: list[str], output_dir: str | None, formats: list[str],
+              name_override: str | None) -> int:
+    """Non-interactive flow: runs recon for every target in sequence (no
+    prompts) and, unless formats is empty, saves each one's report right
+    away \u2014 using name_override for a single-target run, or an
+    auto-generated '<target>_<timestamp>' name per target otherwise.
+    Returns a process exit code (1 if any target raised an unexpected
+    error, 0 otherwise) so the run can be wired into a pipeline."""
+    exit_code = 0
+
+    for raw_target in targets:
+        original_stdout = sys.stdout
+        buffer = io.StringIO()
+        sys.stdout = Tee(original_stdout, buffer)
+        session = None
+        try:
+            print("=" * 60)
+            print(f" IPWhoAll - target: {raw_target}")
+            print(" (restricted to targets with formal testing authorization)")
+            print("=" * 60)
+            session = perform_recon(raw_target, allow_prompts=False)
+            print("\n[\u2713] Reconnaissance complete.")
+        except Exception as e:
+            print(f"[!] Unexpected error processing '{raw_target}': {e}")
+            exit_code = 1
+        finally:
+            sys.stdout = original_stdout
+
+        if session is None:
+            continue
+
+        if formats:
+            base_name = name_override or default_base_name(session["target"])
+            if "txt" in formats:
+                save_report(buffer.getvalue(), f"{base_name}.txt", output_dir)
+            if "json" in formats:
+                save_report(build_json_content(session), f"{base_name}.json", output_dir)
+            if "csv" in formats:
+                save_report(build_csv_content(session), f"{base_name}.csv", output_dir)
+
+    return exit_code
+
+
+def parse_formats(value: str) -> list[str]:
+    """Parses the --formats value into a list like ['txt', 'json']. Accepts
+    a comma-separated combination of txt/json/csv, 'all', or 'none' (which
+    returns an empty list, meaning "don't save anything")."""
+    value = (value or "").strip().lower()
+    if not value or value == "none":
+        return []
+    if value == "all":
+        return ["txt", "json", "csv"]
+
+    valid = {"txt", "json", "csv"}
+    selected = []
+    for part in value.split(","):
+        part = part.strip()
+        if part in valid and part not in selected:
+            selected.append(part)
+    return selected
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="recon.py",
+        description="IPWhoAll - Initial reconnaissance automation for authorized pentests.",
+        epilog="With no TARGET and no --targets-file, runs in interactive mode "
+               "(prompts for the target and for where/how to save the report). "
+               "Passing one or more targets switches to non-interactive/batch "
+               "mode, suitable for pipelines.",
+    )
+    parser.add_argument(
+        "targets", nargs="*", metavar="TARGET",
+        help="One or more IPs or web addresses (domain/URL) to run recon against.",
+    )
+    parser.add_argument(
+        "-f", "--targets-file", metavar="PATH",
+        help="Path to a text file with one target per line ('#' comments allowed).",
+    )
+    parser.add_argument(
+        "-o", "--output-dir", metavar="DIR", default=None,
+        help="Directory under which the IPWhoAll/ report folder is created "
+             "(default: current directory). Ignored if --formats is 'none'.",
+    )
+    parser.add_argument(
+        "--formats", default="txt", metavar="LIST",
+        help="Comma-separated export formats for batch mode: txt,json,csv, "
+             "'all', or 'none' to skip saving entirely. Default: txt.",
+    )
+    parser.add_argument(
+        "--name", metavar="NAME",
+        help="Base file name (without extension) for the report. Only valid "
+             "with a single target; ignored (auto-generated instead) when "
+             "running against multiple targets.",
+    )
+    return parser
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    return build_arg_parser().parse_args(argv)
+
+
+def main():
+    args = parse_args()
+
+    if not args.targets and not args.targets_file:
+        run_interactive()
+        return
+
+    targets = list(args.targets)
+    if args.targets_file:
+        try:
+            with open(args.targets_file, "r", encoding="utf-8") as f:
+                targets.extend(
+                    line.strip() for line in f
+                    if line.strip() and not line.strip().startswith("#")
+                )
+        except OSError as e:
+            print(f"[!] Could not read targets file '{args.targets_file}': {e}")
+            sys.exit(1)
+
+    if not targets:
+        print("[!] No targets given.")
+        sys.exit(1)
+
+    if args.name and len(targets) > 1:
+        print("[!] --name can only be used with a single target; ignoring it for this run.")
+        args.name = None
+
+    formats = parse_formats(args.formats)
+    exit_code = run_batch(targets, args.output_dir, formats, args.name)
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
